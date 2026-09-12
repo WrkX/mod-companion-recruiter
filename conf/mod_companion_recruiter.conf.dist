@@ -1,0 +1,21 @@
+[ModuleConf]
+
+# Master switch.
+CompanionRecruiter.Enabled = 1
+
+# Players below this level cannot recruit companions.
+CompanionRecruiter.MinimumLevel = 10
+
+# Multiplier for the level-scaled price curve. Set to 0 for free contracts.
+CompanionRecruiter.CostMultiplier = 1.0
+
+# Normal contract duration.
+CompanionRecruiter.LifetimeMinutes = 60
+
+# Once a contract expires, dead players and players in instances retain their
+# companions. This grace period begins (or is refreshed) while protected.
+CompanionRecruiter.ProtectInInstances = 1
+CompanionRecruiter.ExpiryGraceMinutes = 10
+
+# One player plus this maximum must fit within the 40-player raid cap.
+CompanionRecruiter.MaxCompanionsPerPlayer = 39
