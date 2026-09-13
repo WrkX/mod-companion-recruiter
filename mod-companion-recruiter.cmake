@@ -2,6 +2,11 @@ if(NOT BUILD_PLAYERBOTS)
   message(FATAL_ERROR "mod-companion-recruiter requires BUILD_PLAYERBOTS=ON")
 endif()
 
+if(TORTOISE_CURRENT_MODULE_LINKAGE STREQUAL "dynamic")
+  message(FATAL_ERROR
+    "mod-companion-recruiter must be built statically because PlayerBots is a static, non-PIC library")
+endif()
+
 if(TORTOISE_MODULE_CMAKE_PHASE STREQUAL "POST_TARGETS")
   if(TORTOISE_CURRENT_MODULE_LINKAGE STREQUAL "dynamic")
     set(COMPANION_RECRUITER_TARGET mod_mod_companion_recruiter)
@@ -14,5 +19,6 @@ if(TORTOISE_MODULE_CMAKE_PHASE STREQUAL "POST_TARGETS")
       ${CMAKE_SOURCE_DIR}/src/modules/PlayerBots
       ${CMAKE_SOURCE_DIR}/src/modules/PlayerBots/playerbot
       ${CMAKE_SOURCE_DIR}/src/modules/PlayerBots/playerbot/strategy)
+  target_compile_definitions(${COMPANION_RECRUITER_TARGET} PRIVATE MANGOSBOT_ZERO ENABLE_PLAYERBOTS)
   target_link_libraries(${COMPANION_RECRUITER_TARGET} PUBLIC playerbots)
 endif()

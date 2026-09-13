@@ -12,6 +12,14 @@ CompanionRecruiter.CostMultiplier = 1.0
 # Normal contract duration.
 CompanionRecruiter.LifetimeMinutes = 60
 
+# Refund and remove a companion that cannot log in within this many seconds,
+# or cannot join within this many seconds after preparation. Clamped to 30-600.
+CompanionRecruiter.LoginTimeoutSeconds = 120
+
+# Fresh bot spell, skill, gear, and supply initialization is deliberately
+# paced on the world thread. Clamped to 1-5 companions per one-second update.
+CompanionRecruiter.PreparationsPerUpdate = 2
+
 # Once a contract expires, dead players and players in instances retain their
 # companions. This grace period begins (or is refreshed) while protected.
 CompanionRecruiter.ProtectInInstances = 1
