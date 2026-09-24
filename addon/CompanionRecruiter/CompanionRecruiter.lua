@@ -173,7 +173,7 @@ local active = false
 local preview = false
 local recruitCost = nil
 local mode = "temporary"
-local temporaryDescription = "Recruit a companion for a limited time. Companions will leave when the group is disbanded"
+local temporaryDescription = "Recruit a companion for a limited\ntime. Companions will leave when\nthe group is disbanded."
 local picker
 local ShowPage
 local UpdatePicker
@@ -200,13 +200,26 @@ local function Box(parent, x, y, width, height, r, g, b, name)
     frame:SetWidth(width)
     frame:SetHeight(height)
     frame:SetBackdrop({
-        bgFile = "Interface\\Buttons\\WHITE8X8",
+        bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
         edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
-        tile = true, tileSize = 32, edgeSize = 16,
-        insets = { left = 4, right = 4, top = 4, bottom = 4 }
+        tile = true, tileSize = 16, edgeSize = 16,
+        insets = { left = 5, right = 5, top = 5, bottom = 5 }
     })
     frame:SetBackdropColor(r or 0.08, g or 0.08, b or 0.08, 1)
-    frame:SetBackdropBorderColor(0.56, 0.42, 0.19, 1)
+    frame:SetBackdropBorderColor(0.58, 0.45, 0.27, 1)
+    return frame
+end
+
+local function IconSelectionBorder(parent, icon)
+    local frame = CreateFrame("Frame", nil, parent)
+    frame:SetPoint("TOPLEFT", icon, "TOPLEFT", -2, 2)
+    frame:SetPoint("BOTTOMRIGHT", icon, "BOTTOMRIGHT", 2, -2)
+    frame:SetBackdrop({
+        edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+        tile = true, tileSize = 16, edgeSize = 6,
+        insets = { left = 0, right = 0, top = 0, bottom = 0 }
+    })
+    frame:SetBackdropBorderColor(0.9, 0.68, 0.28, 0)
     return frame
 end
 
@@ -290,6 +303,18 @@ local function NavigateTab(target)
 end
 
 local window = Box(UIParent, 0, 0, 600, 410, 0.04, 0.04, 0.04, "CompanionRecruiterWindow")
+window:SetBackdrop({
+    bgFile = "Interface\\Buttons\\WHITE8X8",
+    tile = true, tileSize = 32,
+    insets = { left = 11, right = 12, top = 12, bottom = 11 }
+})
+window:SetBackdropColor(0.025, 0.027, 0.032, 1)
+local windowBackground = window:CreateTexture(nil, "BACKGROUND")
+windowBackground:SetPoint("TOPLEFT", window, "TOPLEFT", 12, -13)
+windowBackground:SetPoint("BOTTOMRIGHT", window, "BOTTOMRIGHT", -13, 12)
+windowBackground:SetTexture("Interface\\CompanionRecruiter\\companion-recruiter-background")
+-- Use the large lower-left panel from the Auction House texture atlas, excluding its trim.
+windowBackground:SetTexCoord(0.1816, 0.4697, 0.3945, 0.7930)
 window:ClearAllPoints()
 window:SetPoint("CENTER", UIParent, "CENTER", 0, 40)
 window:SetFrameStrata("DIALOG")
@@ -301,35 +326,68 @@ window:SetScript("OnDragStop", function() window:StopMovingOrSizing() end)
 window:Hide()
 CR.window = window
 
-local header = Box(window, 10, -9, 580, 34, 0.10, 0.10, 0.10)
-header:SetBackdropBorderColor(0.45, 0.45, 0.45, 1)
+local header = Box(window, 10, -13, 580, 34, 0.10, 0.10, 0.10)
+header:SetBackdropBorderColor(0.76, 0.76, 0.78, 1)
 local windowTitle = Text(header, "Companion Recruitment", "GameFontNormalLarge", 70, -8, 450, 25, { 1, 0.82, 0.25 })
 windowTitle:SetJustifyH("CENTER")
+local headerRule = header:CreateTexture(nil, "ARTWORK")
+headerRule:SetTexture("Interface\\QuestFrame\\UI-HorizontalBreak")
+headerRule:SetPoint("BOTTOMLEFT", header, "BOTTOMLEFT", 7, -1)
+headerRule:SetWidth(566)
+headerRule:SetHeight(6)
+headerRule:SetVertexColor(0.82, 0.63, 0.30, 0.65)
 local close = CreateFrame("Button", nil, header, "UIPanelCloseButton")
-close:SetPoint("TOPRIGHT", header, "TOPRIGHT", 2, 2)
+close:SetPoint("TOPRIGHT", header, "TOPRIGHT", 1, -1)
 close:SetScript("OnClick", function()
     if preview then window:Hide() else CloseGossip() end
 end)
 
-local rail = Box(window, 10, -49, 142, 225, 0.035, 0.035, 0.035)
+local tabGap = 4
+local tabHeight = 62
+local railPad = 5 + tabGap
+local rail = Box(window, 15, -49, 142, railPad * 2 + tabHeight * 3 + tabGap * 2, 0.035, 0.035, 0.035)
 rail:SetBackdropBorderColor(0.31, 0.30, 0.28, 1)
+local function StyleNavigationTab(tab, selected, hovered)
+    if selected then
+        tab.panel:SetBackdropColor(0.11, 0.13, 0.17, 1)
+        tab.panel:SetBackdropBorderColor(0.96, 0.72, 0.27, 1)
+        tab.label:SetTextColor(1, 0.84, 0.38)
+    elseif hovered then
+        tab.panel:SetBackdropColor(0.10, 0.09, 0.07, 1)
+        tab.panel:SetBackdropBorderColor(0.60, 0.48, 0.29, 1)
+        tab.label:SetTextColor(0.95, 0.87, 0.68)
+    else
+        tab.panel:SetBackdropColor(0.045, 0.045, 0.045, 1)
+        tab.panel:SetBackdropBorderColor(0.30, 0.28, 0.24, 1)
+        tab.label:SetTextColor(0.76, 0.75, 0.70)
+    end
+end
 local function NavigationTab(label, iconPath, y, target)
-    local panel = Box(rail, 5, y, 132, 62, 0.06, 0.06, 0.06)
+    local panel = Box(rail, 5, y, 132, tabHeight, 0.06, 0.06, 0.06)
     local button = CreateFrame("Button", nil, panel)
     button:SetAllPoints(panel)
-    button:SetHighlightTexture("Interface\\QuestFrame\\UI-QuestTitleHighlight")
     local icon = button:CreateTexture(nil, "ARTWORK")
     icon:SetTexture(iconPath)
     icon:SetWidth(28)
     icon:SetHeight(28)
     icon:SetPoint("LEFT", button, "LEFT", 8, 0)
     local text = Text(button, label, "GameFontHighlightSmall", 42, -17, 85, 32, { 0.8, 0.8, 0.76 })
+    local tab = { panel = panel, label = text, target = target }
     button:SetScript("OnClick", function() NavigateTab(target) end)
-    return { panel = panel, label = text }
+    button:SetScript("OnEnter", function()
+        tab.hovered = true
+        StyleNavigationTab(tab, tab.target == mode, true)
+    end)
+    button:SetScript("OnLeave", function()
+        tab.hovered = false
+        StyleNavigationTab(tab, tab.target == mode, false)
+    end)
+    StyleNavigationTab(tab, target == mode, false)
+    return tab
 end
-local temporaryTab = NavigationTab("Temporary\nRecruitment", "Interface\\Icons\\INV_Helmet_06", -19, "temporary")
-local permanentTab = NavigationTab("Permanent\nRecruitment", "Interface\\Icons\\INV_BannerPVP_02", -85, "permanent")
-local manageTab = NavigationTab("Companion\nManagement", "Interface\\Icons\\Trade_Engineering", -151, "manage")
+local temporaryTab = NavigationTab("Temporary\nRecruitment", "Interface\\Icons\\INV_Helmet_06", -railPad, "temporary")
+local permanentTab = NavigationTab("Permanent\nRecruitment", "Interface\\Icons\\INV_BannerPVP_02", -(railPad + tabHeight + tabGap), "permanent")
+local manageTab = NavigationTab("Companion\nManagement", "Interface\\Icons\\Trade_Engineering", -(railPad + (tabHeight + tabGap) * 2), "manage")
 local tabs = { temporary = temporaryTab, permanent = permanentTab, manage = manageTab }
 
 local content = CreateFrame("Frame", nil, window)
@@ -347,41 +405,106 @@ local function NewPage(name)
 end
 
 local main = NewPage("main")
-Text(main, "Temporary Recruitment", "GameFontNormalLarge", 12, -6, 394, 25, { 1, 0.78, 0.27 })
+local mainBackground = main:CreateTexture(nil, "BACKGROUND")
+mainBackground:SetAllPoints(main)
+mainBackground:SetTexCoord(0, 1, 0, 0.798828125)
+local function UpdateMainBackground()
+    local faction = CurrentFactionGroup()
+    local texture = faction == "Horde" and "recruiter-background-horde" or "recruiter-background-alliance"
+    mainBackground:SetTexture("Interface\\CompanionRecruiter\\" .. texture)
+end
+UpdateMainBackground()
+local contentBorder = CreateFrame("Frame", nil, content)
+contentBorder:SetFrameLevel(content:GetFrameLevel() + 10)
+contentBorder:SetPoint("TOPLEFT", content, "TOPLEFT", -4, 6)
+contentBorder:SetPoint("BOTTOMRIGHT", content, "BOTTOMRIGHT", 7, -10)
+contentBorder:SetBackdrop({
+    edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Border",
+    tile = true, tileSize = 32, edgeSize = 14,
+    insets = { left = 0, right = 0, top = 0, bottom = 0 }
+})
+contentBorder:SetBackdropBorderColor(0.76, 0.76, 0.78, 0.95)
+local contentParchment = content:CreateTexture(nil, "BACKGROUND")
+contentParchment:SetPoint("TOPLEFT", content, "TOPLEFT")
+contentParchment:SetPoint("BOTTOMRIGHT", contentBorder, "BOTTOMRIGHT", -7, 0)
+contentParchment:SetTexture("Interface\\CompanionRecruiter\\parchment")
+contentParchment:SetTexCoord(0, 1, 0, 0.798828125)
+contentParchment:SetVertexColor(1, 1, 1, 1)
+contentParchment:Hide()
+mainBackground:ClearAllPoints()
+mainBackground:SetPoint("TOPLEFT", main, "TOPLEFT", 0, 0)
+mainBackground:SetPoint("BOTTOMRIGHT", contentBorder, "BOTTOMRIGHT", -7, 0)
+-- The shared content border sits above page backgrounds; redraw the outer trim above it.
+local windowBorderOverlay = CreateFrame("Frame", nil, window)
+windowBorderOverlay:SetAllPoints(window)
+windowBorderOverlay:SetBackdrop({
+    edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Border",
+    tile = true, tileSize = 32, edgeSize = 32,
+    insets = { left = 11, right = 12, top = 12, bottom = 11 }
+})
+windowBorderOverlay:SetBackdropBorderColor(0.84, 0.84, 0.86, 1)
+windowBorderOverlay:SetFrameLevel(contentBorder:GetFrameLevel() + 10)
+close:SetFrameLevel(windowBorderOverlay:GetFrameLevel() + 1)
+local mainTitle = Text(main, "Temporary Recruitment", "GameFontNormalLarge", 12, -6, 394, 25,
+    { 1, 0.78, 0.27 })
 local mainDescription = Text(main, temporaryDescription,
-    "GameFontHighlight", 12, -38, 394, 43, { 0.86, 0.83, 0.78 })
+    "GameFontHighlight", 12, -38, 394, 43, { 0.84, 0.82, 0.78 })
 
-local fillCard = Box(main, 10, -95, 193, 187, 0.08, 0.08, 0.08)
-local fillIcon = fillCard:CreateTexture(nil, "ARTWORK")
+local fillCard = Box(main, 10, -145, 193, 187, 0.08, 0.08, 0.08)
+fillCard:SetBackdropColor(0.035, 0.035, 0.04, 1)
+local fillIconSlot = fillCard:CreateTexture(nil, "ARTWORK")
+fillIconSlot:SetTexture("Interface\\Buttons\\UI-EmptySlot")
+fillIconSlot:SetPoint("TOP", fillCard, "TOP", 0, -7)
+fillIconSlot:SetWidth(54)
+fillIconSlot:SetHeight(54)
+local fillIcon = fillCard:CreateTexture(nil, "OVERLAY")
 fillIcon:SetTexture("Interface\\Icons\\Spell_Holy_PrayerOfHealing")
-fillIcon:SetPoint("TOP", fillCard, "TOP", 0, -15)
-fillIcon:SetWidth(45)
-fillIcon:SetHeight(45)
-local fillTitle = Text(fillCard, "Fill Group", "GameFontNormalLarge", 10, -67, 173, 25, { 1, 0.78, 0.27 })
-local fillDescription = Text(fillCard, "Recruit the missing tank, healer, and damage roles for your party.",
-    "GameFontHighlightSmall", 14, -99, 166, 31, { 0.85, 0.82, 0.77 })
-local fillCost = Text(fillCard, "", "GameFontNormalSmall", 14, -132, 166, 18, { 1, 0.78, 0.27 })
-local fillButton = Button(fillCard, "Fill Group", 22, -152, 150, 25, function()
+fillIcon:SetPoint("CENTER", fillIconSlot, "CENTER", 0, 0)
+fillIcon:SetWidth(40)
+fillIcon:SetHeight(40)
+local fillTitle = Text(fillCard, "Fill Group", "GameFontNormalLarge", 10, -63, 173, 25, { 1, 0.78, 0.27 })
+local fillDescription = Text(fillCard, "Recruit the missing tank, healer,\nand damage roles for your\nparty.",
+    "GameFontHighlightSmall", 14, -90, 166, 39, { 0.85, 0.82, 0.77 })
+local fillCost = Text(fillCard, "", "GameFontNormalSmall", 14, -131, 166, 18, { 1, 0.78, 0.27 })
+local fillButton = Button(fillCard, "Fill Group", 22, -151, 150, 25, function()
     if preview then
         raidSize = nil
         ShowPage(GetNumRaidMembers() > 0 and "raids" or "fillAssignments")
     else SelectOption(HasOption("Fill my raid") and "Fill my raid" or "Fill my party") end
 end)
 
-local chooseCard = Box(main, 216, -95, 193, 187, 0.08, 0.08, 0.08)
-local chooseIcon = chooseCard:CreateTexture(nil, "ARTWORK")
-SetClassIcon(chooseIcon, "Warrior")
-chooseIcon:SetPoint("TOP", chooseCard, "TOP", 0, -15)
-chooseIcon:SetWidth(45)
-chooseIcon:SetHeight(45)
-local chooseTitle = Text(chooseCard, "Class & Spec", "GameFontNormalLarge", 10, -67, 173, 25, { 1, 0.78, 0.27 })
-Text(chooseCard, "Choose a class and specialization for one new companion.",
-    "GameFontHighlightSmall", 14, -99, 166, 31, { 0.85, 0.82, 0.77 })
+local chooseCard = Box(main, 216, -145, 193, 187, 0.08, 0.08, 0.08)
+chooseCard:SetBackdropColor(0.035, 0.035, 0.04, 1)
+local chooseIconSlot = chooseCard:CreateTexture(nil, "ARTWORK")
+chooseIconSlot:SetTexture("Interface\\Buttons\\UI-EmptySlot")
+chooseIconSlot:SetPoint("TOP", chooseCard, "TOP", 0, -7)
+chooseIconSlot:SetWidth(54)
+chooseIconSlot:SetHeight(54)
+local chooseIcon = chooseCard:CreateTexture(nil, "OVERLAY")
+chooseIcon:SetTexture(roleIcons.Damage)
+chooseIcon:SetTexCoord(0, 1, 0, 1)
+chooseIcon:SetPoint("CENTER", chooseIconSlot, "CENTER", 0, 0)
+chooseIcon:SetWidth(40)
+chooseIcon:SetHeight(40)
+main:SetScript("OnShow", function()
+    fillIcon:SetTexture("Interface\\Icons\\Spell_Holy_PrayerOfHealing")
+    fillIcon:SetTexCoord(0, 1, 0, 1)
+    fillIcon:SetVertexColor(1, 1, 1, 1)
+    fillIcon:Show()
+    chooseIcon:SetTexture(roleIcons.Damage)
+    chooseIcon:SetTexCoord(0, 1, 0, 1)
+    chooseIcon:SetVertexColor(1, 1, 1, 1)
+    chooseIcon:Show()
+end)
+local chooseTitle = Text(chooseCard, "Class & Spec", "GameFontNormalLarge", 10, -63, 173, 25, { 1, 0.78, 0.27 })
+local chooseDescription = Text(chooseCard, "Choose a class and\nspecialization for one\nnew companion.",
+    "GameFontHighlightSmall", 14, -90, 166, 39, { 0.85, 0.82, 0.77 })
 fillTitle:SetJustifyH("CENTER")
 chooseTitle:SetJustifyH("CENTER")
 fillDescription:SetJustifyH("CENTER")
-local chooseCost = Text(chooseCard, "", "GameFontNormalSmall", 14, -132, 166, 18, { 1, 0.78, 0.27 })
-local chooseButton = Button(chooseCard, "Choose Class & Spec", 22, -152, 150, 25, function()
+chooseDescription:SetJustifyH("CENTER")
+local chooseCost = Text(chooseCard, "", "GameFontNormalSmall", 14, -131, 166, 18, { 1, 0.78, 0.27 })
+local chooseButton = Button(chooseCard, "Choose Class & Spec", 22, -151, 150, 25, function()
     selectedClass = "Warrior"
     selectedSpec = nil
     pendingClass = nil
@@ -437,9 +560,6 @@ for i = 1, table.getn(classNames) do
     tile:SetPoint("TOPLEFT", picker, "TOPLEFT", 15 + col * 82, -58 - row * 57)
     tile:SetWidth(72)
     tile:SetHeight(54)
-    local iconBorder = Box(tile, 0, 0, 40, 40, 0.08, 0.08, 0.08)
-    iconBorder:SetBackdropColor(0, 0, 0, 0)
-    iconBorder:SetBackdropBorderColor(1, 0.74, 0.24, 0)
     local button = CreateFrame("Button", nil, tile)
     button:SetAllPoints(tile)
     local icon = button:CreateTexture(nil, "ARTWORK")
@@ -447,8 +567,8 @@ for i = 1, table.getn(classNames) do
     icon:SetWidth(31)
     icon:SetHeight(31)
     icon:SetPoint("TOP", button, "TOP", 0, -2)
-    iconBorder:ClearAllPoints()
-    iconBorder:SetPoint("CENTER", icon, "CENTER")
+    local iconBorder = IconSelectionBorder(tile, icon)
+    iconBorder:SetFrameLevel(button:GetFrameLevel() + 1)
     local label = Text(tile, name, "GameFontNormalSmall", 2, -36, 68, 15, { 1, 0.78, 0.27 })
     label:SetJustifyH("CENTER")
     button:SetScript("OnClick", function() SelectPickerClass(name) end)
@@ -456,11 +576,11 @@ for i = 1, table.getn(classNames) do
 end
 
 local pickerDivider = picker:CreateTexture(nil, "BACKGROUND")
-pickerDivider:SetTexture("Interface\\Buttons\\WHITE8X8")
-pickerDivider:SetVertexColor(0.33, 0.29, 0.21, 1)
+pickerDivider:SetTexture("Interface\\QuestFrame\\UI-HorizontalBreak")
+pickerDivider:SetVertexColor(0.78, 0.59, 0.29, 0.82)
 pickerDivider:SetPoint("TOPLEFT", picker, "TOPLEFT", 12, -173)
 pickerDivider:SetWidth(398)
-pickerDivider:SetHeight(1)
+pickerDivider:SetHeight(7)
 local pickerColumnDivider = picker:CreateTexture(nil, "BACKGROUND")
 pickerColumnDivider:SetTexture("Interface\\Buttons\\WHITE8X8")
 pickerColumnDivider:SetVertexColor(0.33, 0.29, 0.21, 1)
@@ -474,9 +594,6 @@ for i = 1, 4 do
     tile:SetPoint("TOPLEFT", picker, "TOPLEFT", 7 + (i - 1) * 104, -219)
     tile:SetWidth(96)
     tile:SetHeight(76)
-    local iconBorder = Box(tile, 0, 0, 46, 46, 0.08, 0.08, 0.08)
-    iconBorder:SetBackdropColor(0, 0, 0, 0)
-    iconBorder:SetBackdropBorderColor(1, 0.74, 0.24, 0)
     local button = CreateFrame("Button", nil, tile)
     button:SetAllPoints(tile)
     local icon = button:CreateTexture(nil, "ARTWORK")
@@ -484,8 +601,8 @@ for i = 1, 4 do
     icon:SetWidth(38)
     icon:SetHeight(38)
     icon:SetPoint("TOP", button, "TOP", 0, -5)
-    iconBorder:ClearAllPoints()
-    iconBorder:SetPoint("CENTER", icon, "CENTER")
+    local iconBorder = IconSelectionBorder(tile, icon)
+    iconBorder:SetFrameLevel(button:GetFrameLevel() + 1)
     local label = Text(tile, "", "GameFontNormalSmall", 5, -49, 86, 25, { 1, 0.78, 0.27 })
     label:SetJustifyH("CENTER")
     button:SetScript("OnClick", function()
@@ -506,20 +623,16 @@ for i = 1, table.getn(raceNames) do
     local raceName = raceNames[i]
     local tile = CreateFrame("Frame", nil, picker)
     tile:SetWidth(120)
-    tile:SetHeight(18)
-    local iconBorder = Box(tile, 0, 0, 22, 22, 0.08, 0.08, 0.08)
-    iconBorder:SetBackdropColor(0, 0, 0, 0)
-    iconBorder:SetBackdropBorderColor(1, 0.74, 0.24, 0)
+    tile:SetHeight(26)
     local button = CreateFrame("Button", nil, tile)
     button:SetAllPoints(tile)
     local icon = button:CreateTexture(nil, "ARTWORK")
     SetRaceGenderIcon(icon, raceName, "Male")
-    icon:SetWidth(16)
-    icon:SetHeight(16)
+    icon:SetWidth(22)
+    icon:SetHeight(22)
     icon:SetPoint("LEFT", button, "LEFT", 2, 0)
-    iconBorder:ClearAllPoints()
-    iconBorder:SetPoint("CENTER", icon, "CENTER")
-    local label = Text(tile, raceName, "GameFontNormalSmall", 25, -1, 91, 16, { 1, 0.78, 0.27 })
+    local iconBorder = IconSelectionBorder(tile, icon)
+    local label = Text(tile, raceName, "GameFontNormal", 28, -5, 90, 18, { 1, 0.78, 0.27 })
     label:SetJustifyH("LEFT")
     button:SetScript("OnClick", function()
         if not pickerRaceButtons[raceName].canSelect then return end
@@ -527,7 +640,7 @@ for i = 1, table.getn(raceNames) do
         UpdatePicker()
         if not preview then SelectOption("Race: " .. raceName) end
     end)
-    pickerRaceButtons[raceName] = { tile = tile, button = button, icon = icon, iconBorder = iconBorder }
+    pickerRaceButtons[raceName] = { tile = tile, button = button, icon = icon, iconBorder = iconBorder, label = label }
 end
 
 local pickerBack = Button(picker, "Back", 6, -306, 96, 27, function()
@@ -546,6 +659,14 @@ end)
 UpdatePicker = function()
     local j
     local permanent = mode == "permanent"
+    pickerTitle:SetTextColor(0.23, 0.12, 0.035)
+    pickerClassTitle:SetTextColor(0.27, 0.17, 0.075)
+    pickerRaceTitle:SetTextColor(0.27, 0.17, 0.075)
+    pickerSpecTitle:SetTextColor(0.27, 0.17, 0.075)
+    pickerSpecHint:SetTextColor(0.39, 0.28, 0.16)
+    pickerCost:SetTextColor(0.35, 0.19, 0.045)
+    pickerDivider:SetVertexColor(0.43, 0.27, 0.10, 0.72)
+    pickerColumnDivider:SetVertexColor(0.43, 0.27, 0.10, 0.75)
     for j = 1, table.getn(classNames) do
         local name = classNames[j]
         if HasOption(name) then pickerClassAvailability[name] = true end
@@ -554,8 +675,8 @@ UpdatePicker = function()
         entry.button:EnableMouse(available and not pendingClass)
         entry.tile:SetAlpha(available and 1 or 0.3)
         local selected = selectedClass == name
-        entry.iconBorder:SetBackdropBorderColor(selected and 1 or 0.40,
-            selected and 0.9 or 0.36, selected and 0.25 or 0.28, selected and 1 or 0)
+        entry.iconBorder:SetBackdropBorderColor(selected and 0.48 or 0.40,
+            selected and 0.23 or 0.36, selected and 0.045 or 0.28, selected and 1 or 0)
     end
 
     if permanent then
@@ -603,7 +724,7 @@ UpdatePicker = function()
         if visible then
             entry.tile:ClearAllPoints()
             entry.tile:SetPoint("TOPLEFT", picker, "TOPLEFT", 295,
-                (permanent and -58 or -204) - visibleRaceCount * 20)
+                (permanent and -56 or -204) - visibleRaceCount * 28)
             entry.tile:SetAlpha(canSelect and 1 or 0.3)
             entry.tile:Show()
             entry.button:EnableMouse(canSelect and not pendingClass)
@@ -613,10 +734,9 @@ UpdatePicker = function()
             entry.button:EnableMouse(false)
         end
         local selected = selectedRace == raceName and canSelect
-        entry.iconBorder:SetWidth(selected and 25 or 22)
-        entry.iconBorder:SetHeight(selected and 25 or 22)
-        entry.iconBorder:SetBackdropBorderColor(selected and 1 or 0.40,
-            selected and 0.74 or 0.36, selected and 0.24 or 0.28, selected and 1 or 0)
+        entry.iconBorder:SetBackdropBorderColor(selected and 0.48 or 0.40,
+            selected and 0.23 or 0.36, selected and 0.045 or 0.28, selected and 1 or 0)
+        entry.label:SetTextColor(0.25, 0.14, 0.045)
     end
     if selectedRace and not (preview and IsRaceInCurrentFaction(selectedRace) and
         IsRaceAvailableForClass(selectedClass, selectedRace) or
@@ -658,11 +778,10 @@ UpdatePicker = function()
             entry.icon:SetHeight(iconSize)
             entry.icon:ClearAllPoints()
             entry.icon:SetPoint("TOP", entry.button, "TOP", 0, permanent and -4 or -5)
-            entry.iconBorder:SetWidth(iconSize + 8)
-            entry.iconBorder:SetHeight(iconSize + 8)
             entry.label:SetPoint("TOPLEFT", entry.tile, "TOPLEFT", 5,
                 permanent and (specCount > 3 and -38 or -45) or -49)
             entry.label:SetHeight(permanent and 30 or 25)
+            entry.label:SetTextColor(0.25, 0.14, 0.045)
             entry.tile:Show()
         else
             entry.tile:Hide()
@@ -670,8 +789,8 @@ UpdatePicker = function()
         entry.button:EnableMouse(available and not pendingClass)
         entry.tile:SetAlpha(available and 1 or 0.3)
         local selected = selectedSpec == (spec and spec.name)
-        entry.iconBorder:SetBackdropBorderColor(selected and 1 or 0.42,
-            selected and 0.9 or 0.36, 0.20, selected and 1 or 0)
+        entry.iconBorder:SetBackdropBorderColor(selected and 0.48 or 0.42,
+            selected and 0.23 or 0.36, 0.045, selected and 1 or 0)
     end
 
     for j = 1, table.getn(classNames) do
@@ -687,6 +806,7 @@ UpdatePicker = function()
         entry.label:ClearAllPoints()
         entry.label:SetPoint("TOPLEFT", entry.tile, "TOPLEFT", permanent and 0 or 2, -36)
         entry.label:SetWidth(permanent and 52 or 68)
+        entry.label:SetTextColor(0.25, 0.14, 0.045)
     end
     local price = selectedSpec and CostFor(selectedSpec) or
         (specs and specs[1] and CostFor(specs[1].name)) or recruitCost
@@ -722,11 +842,6 @@ StaticPopupDialogs["COMPANION_RECRUITER_DISMISS"] = {
 }
 
 local classes = NewPage("classes")
-local parchment = classes:CreateTexture(nil, "BACKGROUND")
-parchment:SetAllPoints(classes)
-parchment:SetTexture("Interface\\QuestFrame\\QuestBG")
-parchment:SetVertexColor(0.85, 0.75, 0.55)
-parchment:Hide()
 local classesTitle = Text(classes, "Select Class & Specialization", "GameFontNormalLarge", 12, -6, 390, 26, { 1, 0.78, 0.27 })
 local classesDescription = Text(classes, "Select Class",
     "GameFontHighlight", 12, -39, 390, 30, { 0.84, 0.82, 0.78 })
@@ -739,8 +854,10 @@ for i = 1, table.getn(classNames) do
     local name = classNames[i]
     local col = math.mod(i - 1, 5)
     local row = math.floor((i - 1) / 5)
-    local tile = Box(classGrid, 12 + col * 81, -65 - row * 67, 72, 63, 0.08, 0.08, 0.08)
-    tile:SetBackdropBorderColor(0.40, 0.36, 0.28, 1)
+    local tile = CreateFrame("Frame", nil, classGrid)
+    tile:SetPoint("TOPLEFT", classGrid, "TOPLEFT", 12 + col * 81, -65 - row * 67)
+    tile:SetWidth(72)
+    tile:SetHeight(63)
     local icon = CreateFrame("Button", nil, tile)
     icon:SetPoint("TOP", tile, "TOP", 0, -7)
     icon:SetWidth(36)
@@ -748,6 +865,8 @@ for i = 1, table.getn(classNames) do
     icon:SetNormalTexture(classIconTexture)
     SetClassIcon(icon:GetNormalTexture(), name)
     icon:SetHighlightTexture("Interface\\Buttons\\ButtonHilight-Square")
+    local iconBorder = IconSelectionBorder(tile, icon)
+    iconBorder:SetFrameLevel(icon:GetFrameLevel() + 1)
     icon:SetScript("OnClick", function()
         selectedClass = name
         selectedSpec = nil
@@ -760,7 +879,7 @@ for i = 1, table.getn(classNames) do
     end)
     local label = Text(tile, name, "GameFontNormalSmall", 3, -44, 66, 16, { 1, 0.78, 0.27 })
     label:SetJustifyH("CENTER")
-    classButtons[name] = { tile = tile, icon = icon }
+    classButtons[name] = { tile = tile, icon = icon, iconBorder = iconBorder, label = label }
 end
 local classHint = Text(classes, "Select a class above to see its specializations.", "GameFontHighlightSmall", 12, -221, 390, 32, { 0.72, 0.69, 0.61 })
 Button(classes, "Back", 11, -293, 122, 27, function()
@@ -768,9 +887,9 @@ Button(classes, "Back", 11, -293, 122, 27, function()
 end)
 
 local roles = NewPage("roles")
-local rolesTitle = Text(roles, "Select Role", "GameFontNormalLarge", 12, -6, 390, 26, { 1, 0.78, 0.27 })
+local rolesTitle = Text(roles, "Select Role", "GameFontNormalLarge", 12, -6, 390, 26, { 0.23, 0.12, 0.035 })
 local rolesDescription = Text(roles, "Only roles supported by the chosen class are available.",
-    "GameFontHighlight", 12, -39, 390, 30, { 0.84, 0.82, 0.78 })
+    "GameFontHighlight", 12, -39, 390, 30, { 0.27, 0.17, 0.075 })
 local roleButtons = {}
 local roleNames = { "Tank", "Healer", "Damage" }
 for i = 1, 3 do
@@ -806,7 +925,7 @@ local roleBack = Button(roles, "Back", 11, -293, 122, 27, function()
     elseif page == "fillRolePicker" then SelectOption("Back to role assignments")
     else SelectOption("Back to recruiter") end
 end)
-local roleCost = Text(roles, "", "GameFontNormalSmall", 14, -274, 390, 23, { 1, 0.78, 0.27 })
+local roleCost = Text(roles, "", "GameFontNormalSmall", 14, -274, 390, 23, { 0.35, 0.19, 0.045 })
 local recruitButton = Button(roles, "Recruit Companion", 246, -293, 163, 27, function()
     if preview then return end
     if selectedRole then
@@ -816,9 +935,9 @@ local recruitButton = Button(roles, "Recruit Companion", 246, -293, 163, 27, fun
 end)
 
 local raids = NewPage("raids")
-Text(raids, "Raid Recruitment", "GameFontNormalLarge", 12, -6, 390, 26, { 1, 0.78, 0.27 })
+Text(raids, "Raid Recruitment", "GameFontNormalLarge", 12, -6, 390, 26, { 0.23, 0.12, 0.035 })
 Text(raids, "Select a raid size. Your group must already be a raid.",
-    "GameFontHighlight", 12, -39, 390, 34, { 0.84, 0.82, 0.78 })
+    "GameFontHighlight", 12, -39, 390, 34, { 0.27, 0.17, 0.075 })
 local raidCosts = {}
 for i = 1, 3 do
     local size = i == 1 and 10 or (i == 2 and 20 or 40)
@@ -836,16 +955,39 @@ Button(raids, "Back", 11, -293, 122, 27, function()
 end)
 
 local manage = NewPage("manage")
-Text(manage, "Companion Management", "GameFontNormalLarge", 12, -6, 390, 26, { 1, 0.78, 0.27 })
-local rosterHeader = Box(manage, 12, -47, 377, 24, 0.12, 0.12, 0.11)
-Text(rosterHeader, "Name", "GameFontHighlightSmall", 36, -6, 96, 16, { 0.7, 0.7, 0.65 })
-Text(rosterHeader, "Class / Spec", "GameFontHighlightSmall", 135, -6, 90, 16, { 0.7, 0.7, 0.65 })
+Text(manage, "Companion Management", "GameFontNormalLarge", 12, -6, 390, 26, { 0.23, 0.12, 0.035 })
+local manageTableBg = Box(manage, 12, -47, 397, 280, 0.07, 0.065, 0.055)
+manageTableBg:SetBackdropColor(0.07, 0.065, 0.055, 0.95)
+local manageListWidth = 367
+local rosterHeader = CreateFrame("Frame", nil, manage)
+rosterHeader:SetPoint("TOPLEFT", manageTableBg, "TOPLEFT", 5, -5)
+rosterHeader:SetPoint("TOPRIGHT", manageTableBg, "TOPRIGHT", -5, -5)
+rosterHeader:SetHeight(22)
+local rosterHeaderBg = rosterHeader:CreateTexture(nil, "BACKGROUND")
+rosterHeaderBg:SetAllPoints(rosterHeader)
+rosterHeaderBg:SetTexture("Interface\\Buttons\\WHITE8X8")
+rosterHeaderBg:SetVertexColor(0.14, 0.13, 0.11, 1)
+Text(rosterHeader, "Name", "GameFontHighlightSmall", 36, -4, 96, 16, { 0.7, 0.7, 0.65 })
+Text(rosterHeader, "Class / Spec", "GameFontHighlightSmall", 135, -4, 90, 16, { 0.7, 0.7, 0.65 })
+local manageScrollBarBg = CreateFrame("Frame", nil, manage)
+manageScrollBarBg:SetPoint("TOPRIGHT", manageTableBg, "TOPRIGHT", -5, -27)
+manageScrollBarBg:SetPoint("BOTTOMRIGHT", manageTableBg, "BOTTOMRIGHT", -5, 5)
+manageScrollBarBg:SetWidth(20)
+manageScrollBarBg:SetBackdrop({
+    bgFile = "Interface\\Buttons\\WHITE8X8",
+    insets = { left = 0, right = 0, top = 0, bottom = 0 }
+})
+manageScrollBarBg:SetBackdropColor(0.035, 0.032, 0.028, 1)
 local manageScroll = CreateFrame("ScrollFrame", "CompanionRecruiterRosterScroll", manage, "UIPanelScrollFrameTemplate")
-manageScroll:SetPoint("TOPLEFT", manage, "TOPLEFT", 12, -73)
-manageScroll:SetWidth(377)
-manageScroll:SetHeight(250)
+manageScroll:SetPoint("TOPLEFT", manageTableBg, "TOPLEFT", 5, -27)
+manageScroll:SetWidth(manageListWidth)
+manageScroll:SetHeight(248)
+local manageScrollBar = getglobal(manageScroll:GetName() .. "ScrollBar")
+manageScrollBar:ClearAllPoints()
+manageScrollBar:SetPoint("TOP", manageScrollBarBg, "TOP", 0, -16)
+manageScrollBar:SetPoint("BOTTOM", manageScrollBarBg, "BOTTOM", 0, 16)
 local manageContent = CreateFrame("Frame", nil, manageScroll)
-manageContent:SetWidth(377)
+manageContent:SetWidth(manageListWidth)
 manageContent:SetHeight(1)
 manageScroll:SetScrollChild(manageContent)
 local manageRows = {}
@@ -892,7 +1034,7 @@ local function RefreshManageRows()
     for j = 1, table.getn(rowTexts) do
         local row = manageRows[j]
         if not row then
-            row = Box(manageContent, 0, -1 - (j - 1) * 35, 377, 34, 0.055, 0.055, 0.05)
+            row = Box(manageContent, 0, -1 - (j - 1) * 35, manageListWidth, 34, 0.055, 0.055, 0.05)
             row:SetBackdropBorderColor(0.22, 0.22, 0.2, 1)
             row.raceIcon = row:CreateTexture(nil, "ARTWORK")
             row.raceIcon:SetWidth(28)
@@ -968,26 +1110,49 @@ local function RefreshManageRows()
     if table.getn(rowTexts) == 0 then
         if not manageEmptyText then
             manageEmptyText = Text(manageContent, "No permanent companions yet. Buy one from Permanent Recruitment.",
-                "GameFontHighlight", 16, -48, 335, 45, { 0.84, 0.82, 0.78 })
+                "GameFontHighlight", 16, -48, 335, 45, { 0.27, 0.17, 0.075 })
         end
         manageEmptyText:Show()
     end
 end
 
 local fillAssignments = NewPage("fillAssignments")
-Text(fillAssignments, "Assign Roles", "GameFontNormalLarge", 12, -6, 390, 26, { 1, 0.78, 0.27 })
+Text(fillAssignments, "Assign Roles", "GameFontNormalLarge", 12, -6, 390, 26, { 0.23, 0.12, 0.035 })
 Text(fillAssignments, "Choose a role for yourself and each group member.",
-    "GameFontHighlight", 12, -39, 390, 30, { 0.84, 0.82, 0.78 })
-local fillRosterHeader = Box(fillAssignments, 12, -76, 377, 24, 0.12, 0.12, 0.11)
-Text(fillRosterHeader, "Name", "GameFontHighlightSmall", 36, -6, 100, 16, { 0.7, 0.7, 0.65 })
-Text(fillRosterHeader, "Class", "GameFontHighlightSmall", 151, -6, 80, 16, { 0.7, 0.7, 0.65 })
-Text(fillRosterHeader, "Role", "GameFontHighlightSmall", 244, -6, 100, 16, { 0.7, 0.7, 0.65 })
+    "GameFontHighlight", 12, -39, 390, 30, { 0.27, 0.17, 0.075 })
+local fillTableBg = Box(fillAssignments, 12, -76, 397, 200, 0.07, 0.065, 0.055)
+fillTableBg:SetBackdropColor(0.07, 0.065, 0.055, 0.95)
+local fillListWidth = 367
+local fillRosterHeader = CreateFrame("Frame", nil, fillAssignments)
+fillRosterHeader:SetPoint("TOPLEFT", fillTableBg, "TOPLEFT", 5, -5)
+fillRosterHeader:SetPoint("TOPRIGHT", fillTableBg, "TOPRIGHT", -5, -5)
+fillRosterHeader:SetHeight(22)
+local fillRosterHeaderBg = fillRosterHeader:CreateTexture(nil, "BACKGROUND")
+fillRosterHeaderBg:SetAllPoints(fillRosterHeader)
+fillRosterHeaderBg:SetTexture("Interface\\Buttons\\WHITE8X8")
+fillRosterHeaderBg:SetVertexColor(0.14, 0.13, 0.11, 1)
+Text(fillRosterHeader, "Name", "GameFontHighlightSmall", 36, -4, 100, 16, { 0.7, 0.7, 0.65 })
+Text(fillRosterHeader, "Class", "GameFontHighlightSmall", 151, -4, 80, 16, { 0.7, 0.7, 0.65 })
+Text(fillRosterHeader, "Role", "GameFontHighlightSmall", 244, -4, 100, 16, { 0.7, 0.7, 0.65 })
+local fillScrollBarBg = CreateFrame("Frame", nil, fillAssignments)
+fillScrollBarBg:SetPoint("TOPRIGHT", fillTableBg, "TOPRIGHT", -5, -27)
+fillScrollBarBg:SetPoint("BOTTOMRIGHT", fillTableBg, "BOTTOMRIGHT", -5, 5)
+fillScrollBarBg:SetWidth(20)
+fillScrollBarBg:SetBackdrop({
+    bgFile = "Interface\\Buttons\\WHITE8X8",
+    insets = { left = 0, right = 0, top = 0, bottom = 0 }
+})
+fillScrollBarBg:SetBackdropColor(0.035, 0.032, 0.028, 1)
 local fillScroll = CreateFrame("ScrollFrame", "CompanionRecruiterFillRosterScroll", fillAssignments, "UIPanelScrollFrameTemplate")
-fillScroll:SetPoint("TOPLEFT", fillAssignments, "TOPLEFT", 12, -102)
-fillScroll:SetWidth(377)
-fillScroll:SetHeight(174)
+fillScroll:SetPoint("TOPLEFT", fillTableBg, "TOPLEFT", 5, -27)
+fillScroll:SetWidth(fillListWidth)
+fillScroll:SetHeight(168)
+local fillScrollBar = getglobal(fillScroll:GetName() .. "ScrollBar")
+fillScrollBar:ClearAllPoints()
+fillScrollBar:SetPoint("TOP", fillScrollBarBg, "TOP", 0, -16)
+fillScrollBar:SetPoint("BOTTOM", fillScrollBarBg, "BOTTOM", 0, 16)
 local fillContent = CreateFrame("Frame", nil, fillScroll)
-fillContent:SetWidth(377)
+fillContent:SetWidth(fillListWidth)
 fillContent:SetHeight(1)
 fillScroll:SetScrollChild(fillContent)
 local fillRows = {}
@@ -1066,7 +1231,7 @@ local function RefreshFillAssignmentRows()
     for j = 1, table.getn(rowTexts) do
         local row = fillRows[j]
         if not row then
-            row = Box(fillContent, 0, -1 - (j - 1) * 34, 377, 33, 0.055, 0.055, 0.05)
+            row = Box(fillContent, 0, -1 - (j - 1) * 34, fillListWidth, 33, 0.055, 0.055, 0.05)
             row:SetBackdropBorderColor(0.22, 0.22, 0.2, 1)
             row.classIcon = row:CreateTexture(nil, "ARTWORK")
             row.classIcon:SetWidth(22)
@@ -1170,7 +1335,7 @@ fillNextButton = Button(fillAssignments, "More", 105, -280, 88, 25, function()
     if preview then return end
     SelectOption("More members")
 end)
-fillCostText = Text(fillAssignments, "", "GameFontNormalSmall", 202, -283, 207, 18, { 1, 0.78, 0.27 })
+fillCostText = Text(fillAssignments, "", "GameFontNormalSmall", 202, -283, 207, 18, { 0.35, 0.19, 0.045 })
 fillCostText:SetJustifyH("RIGHT")
 local fillCancelButton = Button(fillAssignments, "Cancel", 11, -307, 122, 27, function()
     if preview then ShowPage("main") else SelectOption("Back to recruiter") end
@@ -1235,6 +1400,8 @@ ShowPage = function(name)
     for key in pairs(pages) do pages[key]:Hide() end
     classGrid:Hide()
     page = name
+    if name == "main" then contentParchment:Hide() else contentParchment:Show() end
+    if name == "main" then UpdateMainBackground() end
     if name == "classRole" or name == "fillRole" or name == "fillRolePicker" then
         local choosingClass = name == "classRole"
         rolesTitle:SetText(choosingClass and "Select Class & Specialization" or
@@ -1252,8 +1419,12 @@ ShowPage = function(name)
         local j
         for j = 1, table.getn(classNames) do
             local entry = classButtons[classNames[j]]
+            local selected = classNames[j] == selectedClass
             entry.icon:EnableMouse(false)
-            entry.tile:SetAlpha(classNames[j] == selectedClass and 1 or 0.35)
+            entry.tile:SetAlpha(selected and 1 or 0.35)
+            entry.label:SetTextColor(0.25, 0.14, 0.045)
+            entry.iconBorder:SetBackdropBorderColor(selected and 1 or 0.40,
+                selected and 0.74 or 0.36, selected and 0.24 or 0.28, selected and 1 or 0)
         end
         for j = 1, 3 do
             local entry = roleButtons[roleNames[j]]
@@ -1279,17 +1450,12 @@ ShowPage = function(name)
         pages.raids:Show()
     elseif name == "classes" then
         classGrid:Show()
+        classesTitle:SetTextColor(0.18, 0.10, 0.03)
+        classesDescription:SetTextColor(0.22, 0.14, 0.06)
+        classHint:SetTextColor(0.22, 0.14, 0.06)
         if mode == "permanent" then
-            parchment:Show()
-            classesTitle:SetTextColor(0.18, 0.10, 0.03)
-            classesDescription:SetTextColor(0.22, 0.14, 0.06)
-            classHint:SetTextColor(0.22, 0.14, 0.06)
             classesDescription:SetText("Purchase a companion. Future invitations are free.")
         else
-            parchment:Hide()
-            classesTitle:SetTextColor(1, 0.78, 0.27)
-            classesDescription:SetTextColor(0.84, 0.82, 0.78)
-            classHint:SetTextColor(0.72, 0.69, 0.61)
             classesDescription:SetText("Select Class")
         end
         classesTitle:SetText(mode == "permanent" and "Permanent Recruitment" or "Select Class & Specialization")
@@ -1297,10 +1463,14 @@ ShowPage = function(name)
         for j = 1, table.getn(classNames) do
             local className = classNames[j]
             local available = preview or HasOption(className)
-            classButtons[className].tile:SetAlpha(available and 1 or 0.3)
-            classButtons[className].tile:SetBackdropBorderColor(selectedClass == className and 1 or 0.40,
-                selectedClass == className and 0.74 or 0.36, selectedClass == className and 0.24 or 0.28, 1)
-            classButtons[className].icon:EnableMouse(available)
+            local entry = classButtons[className]
+            local selected = selectedClass == className
+            entry.tile:SetAlpha(available and 1 or 0.3)
+            entry.iconBorder:SetBackdropBorderColor(selected and (mode == "permanent" and 0.48 or 1) or 0.40,
+                selected and (mode == "permanent" and 0.23 or 0.74) or 0.36,
+                selected and (mode == "permanent" and 0.045 or 0.24) or 0.28, selected and 1 or 0)
+            entry.label:SetTextColor(0.25, 0.14, 0.045)
+            entry.icon:EnableMouse(available)
         end
         pages.classes:Show()
     elseif name == "manage" then
@@ -1411,8 +1581,8 @@ local function SyncMenu()
         local raid = HasOption("Fill my raid")
         view.fillCost:SetText((raid and CostFor("Fill my raid") or partyCost) and ("Total: " .. (raid and CostFor("Fill my raid") or partyCost)) or "")
         view.fillTitle:SetText(raid and "Fill Raid" or "Fill Group")
-        view.fillDescription:SetText(raid and "Recruit the missing tank, healer, and damage roles for your raid." or
-            "Recruit the missing tank, healer, and damage roles for your party.")
+        view.fillDescription:SetText(raid and "Recruit the missing tank, healer,\nand damage roles for your raid." or
+            "Recruit the missing tank, healer,\nand damage roles for your\nparty.")
         view.fillButton:SetText(raid and "Fill Raid" or "Fill Group")
         view.raidButton:SetText(raid and "Fill Raid" or "Fill Group")
         view.mainDescription:SetText(temporaryDescription)
@@ -1524,7 +1694,8 @@ SlashCmdList["COMPANIONRECRUITERDEBUG"] = function()
     local raid = GetNumRaidMembers() > 0
     fillTitle:SetText(raid and "Fill Raid" or "Fill Group")
     fillButton:SetText(raid and "Fill Raid" or "Fill Group")
-    fillDescription:SetText("Recruit the missing tank, healer, and damage roles for your " .. (raid and "raid." or "party."))
+    fillDescription:SetText(raid and "Recruit the missing tank, healer,\nand damage roles for your raid." or
+        "Recruit the missing tank, healer,\nand damage roles for your\nparty.")
     ShowPage("main")
     window:Show()
 end

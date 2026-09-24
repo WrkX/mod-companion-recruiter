@@ -346,7 +346,7 @@ uint32 MinimumLevel()
 
 uint32 LifetimeSeconds()
 {
-    return uint32(std::max<int32>(1, sConfig.GetIntDefault("CompanionRecruiter.LifetimeMinutes", 60))) * 60u;
+    return uint32(std::max<int32>(1, sConfig.GetIntDefault("CompanionRecruiter.LifetimeMinutes", 180))) * 60u;
 }
 
 uint32 GraceSeconds()
@@ -374,9 +374,11 @@ float CostMultiplier()
     return std::max(0.0f, sConfig.GetFloatDefault("CompanionRecruiter.CostMultiplier", 1.0f));
 }
 
-float PermanentCostMultiplier()
+uint32 GetPermanentCompanionCost()
 {
-    return std::max(0.0f, sConfig.GetFloatDefault("CompanionRecruiter.PermanentCostMultiplier", 10.0f));
+    int32 const gold = std::clamp<int32>(sConfig.GetIntDefault("CompanionRecruiter.PermanentCostGold", 75),
+        0, int32(MAX_MONEY_AMOUNT / GOLD));
+    return uint32(gold) * GOLD;
 }
 
 uint32 MaxOwnedCompanions()
@@ -392,13 +394,12 @@ uint32 GetCompanionCost(Player const* player)
         uint32 copper;
     };
 
-    static constexpr std::array<CostPoint, 6> curve = {{
+    static constexpr std::array<CostPoint, 5> curve = {{
         {10, 1 * SILVER},
         {20, 4 * SILVER},
         {30, 8 * SILVER},
         {40, 30 * SILVER},
-        {50, 40 * SILVER},
-        {60, 50 * SILVER}
+        {60, 1 * GOLD}
     }};
 
     if (!player)
@@ -427,14 +428,6 @@ uint32 GetCompanionCost(Player const* player)
     }
 
     double const scaled = double(base) * CostMultiplier();
-    if (!(scaled > 0.0))
-        return 0;
-    return uint32(std::min<double>(scaled, MAX_MONEY_AMOUNT));
-}
-
-uint32 GetPermanentCompanionCost(Player const* player)
-{
-    double const scaled = double(GetCompanionCost(player)) * PermanentCostMultiplier();
     if (!(scaled > 0.0))
         return 0;
     return uint32(std::min<double>(scaled, MAX_MONEY_AMOUNT));
@@ -629,6 +622,14 @@ PlayerRole RoleForPlayer(Player const* player)
     if (!player)
         return PlayerRole::Damage;
 
+    uint32 const guid = player->GetGUIDLow();
+    auto contract = gContracts.find(guid);
+    if (contract != gContracts.end())
+        return PlayerRoleForBotRole(contract->second.role);
+    auto owned = gOwnedCompanions.find(guid);
+    if (owned != gOwnedCompanions.end())
+        return PlayerRoleForBotRole(owned->second.role);
+
     if (PlayerbotAI* ai = GetBotAI(const_cast<Player*>(player)))
     {
         BotRoles const forcedRole = BotRoles(ai->GetForcedRole());
@@ -637,6 +638,11 @@ PlayerRole RoleForPlayer(Player const* player)
     }
 
     return PlayerRoleForBotRole(AiFactory::GetPlayerRoles(player));
+}
+
+bool IsRecruiterCompanion(Player const* player)
+{
+    return player && (gContracts.count(player->GetGUIDLow()) || gOwnedCompanions.count(player->GetGUIDLow()));
 }
 
 char const* RoleName(PlayerRole role)
@@ -658,7 +664,7 @@ std::vector<Player*> GetRecruitingHumanMembers(Player* owner)
     if (Group* group = owner->GetGroup())
     {
         for (GroupReference* ref = group->GetFirstMember(); ref; ref = ref->next())
-            if (Player* member = ref->getSource(); member && !GetBotAI(member))
+            if (Player* member = ref->getSource(); member && !GetBotAI(member) && !IsRecruiterCompanion(member))
                 members.push_back(member);
     }
     else if (!GetBotAI(owner))
@@ -724,7 +730,18 @@ bool IsRaceInOwnerFaction(Player const* owner, uint8 race)
 
 bool IsRaceAvailableToOwner(Player const* owner, uint8 cls, uint8 race)
 {
+    static RandomPlayerbotFactory raceFactory(0);
     return IsRaceInOwnerFaction(owner, race) && RandomPlayerbotFactory::isAvailableRace(cls, race);
+}
+
+uint8 RandomRaceForOwner(Player const* owner, uint8 cls)
+{
+    std::vector<uint8> races;
+    for (uint32 race = 1; race < MAX_RACES; ++race)
+        if (IsRaceAvailableToOwner(owner, cls, uint8(race)))
+            races.push_back(uint8(race));
+
+    return races.empty() ? 0 : races[urand(0, uint32(races.size() - 1))];
 }
 
 std::vector<uint8> GetRoleClassPool(Player const* owner, BotRoles role)
@@ -760,7 +777,7 @@ RoleCounts GetCurrentRoles(Player* owner, std::map<uint32, PlayerRole> const& as
         if (!member)
             return;
         auto assigned = assignedRoles.find(member->GetGUIDLow());
-        CountRole(counts, !GetBotAI(member) && assigned != assignedRoles.end() ?
+        CountRole(counts, !GetBotAI(member) && !IsRecruiterCompanion(member) && assigned != assignedRoles.end() ?
             assigned->second : RoleForPlayer(member));
     };
 
@@ -878,7 +895,7 @@ bool CreateCompanion(Player* owner, BotRoles role, uint8 forcedClass = 0, bool p
         return false;
     }
 
-    uint32 const cost = permanent ? GetPermanentCompanionCost(owner) : GetCompanionCost(owner);
+    uint32 const cost = permanent ? GetPermanentCompanionCost() : GetCompanionCost(owner);
     if (owner->GetMoney() < cost)
     {
         SendMessage(owner, "You need " + FormatMoney(cost) + " to recruit a companion.");
@@ -907,22 +924,28 @@ bool CreateCompanion(Player* owner, BotRoles role, uint8 forcedClass = 0, bool p
         SendMessage(owner, "No class is available for that role.");
         return false;
     }
-    if (permanent && race && !IsRaceAvailableToOwner(owner, cls, race))
+    if (permanent && !IsRaceAvailableToOwner(owner, cls, race))
     {
         SendMessage(owner, "That race is not available for this companion.");
         return false;
+    }
+    if (!permanent)
+    {
+        race = RandomRaceForOwner(owner, cls);
+        if (!race)
+        {
+            SendMessage(owner, "No race in your faction is available for that class.");
+            return false;
+        }
     }
 
     std::ostringstream parameters;
     parameters << "level=" << uint32(owner->GetLevel())
                << " class=" << ChatHelper::formatClass(cls)
-               << " role=" << ChatHelper::formatRole(role);
-    if (permanent && race)
-    {
-        parameters << " race=" << uint32(race);
-        if (gender == GENDER_MALE || gender == GENDER_FEMALE)
-            parameters << " gender=" << uint32(gender);
-    }
+               << " role=" << ChatHelper::formatRole(role)
+               << " race=" << uint32(race);
+    if (permanent && (gender == GENDER_MALE || gender == GENDER_FEMALE))
+        parameters << " gender=" << uint32(gender);
     if (!permanent)
         parameters << " group=" << owner->GetName();
     parameters << " login=false";
@@ -1041,6 +1064,14 @@ bool FillGroup(Player* owner, uint32 targetSize, std::map<uint32, PlayerRole> co
         SendMessage(owner, "You already command the maximum number of temporary companions.");
         return false;
     }
+
+    RoleCounts counts = GetCurrentRoles(owner, assignedRoles);
+    if (targetSize == 5 && (counts.tanks > 1 || counts.healers > 1 || counts.damage > 3))
+    {
+        SendMessage(owner, "Your selected roles already exceed the party target of 1 tank, 1 healer, and 3 damage. Adjust the roles before filling.");
+        return false;
+    }
+
     uint64 const totalCost = uint64(GetCompanionCost(owner)) * toCreate;
     if (owner->GetMoney() < totalCost)
     {
@@ -1048,7 +1079,6 @@ bool FillGroup(Player* owner, uint32 targetSize, std::map<uint32, PlayerRole> co
         return false;
     }
 
-    RoleCounts counts = GetCurrentRoles(owner, assignedRoles);
     uint32 const desiredTanks = targetSize <= 5 ? 1u : (targetSize <= 20 ? 2u : 4u);
     uint32 const desiredHealers = targetSize <= 5 ? 1u : (targetSize <= 10 ? 2u : (targetSize <= 20 ? 4u : 8u));
     uint32 created = 0;
@@ -1307,7 +1337,7 @@ char const* RecruiterClassName(uint8 cls)
 void AddSpecOptions(Player* player, uint8 cls, bool permanent)
 {
     EnsureRecruiterSpecPaths();
-    std::string const cost = permanent ? " (" + FormatMoney(GetPermanentCompanionCost(player)) + ")" : std::string();
+    std::string const cost = permanent ? " (" + FormatMoney(GetPermanentCompanionCost()) + ")" : std::string();
     for (RecruiterSpec const& spec : RECRUITER_SPECS)
     {
         if (spec.cls != cls || !RecruiterSpecNo(cls, spec.tab))
@@ -1367,7 +1397,7 @@ void AddPermanentClassOptions(Player* player)
 
 void AddPermanentRaceOptions(Player* player, uint8 cls)
 {
-    std::string const cost = FormatMoney(GetPermanentCompanionCost(player));
+    std::string const cost = FormatMoney(GetPermanentCompanionCost());
     for (uint8 race = 1; race < MAX_RACES; ++race)
         if (IsRaceInOwnerFaction(player, race))
         {
@@ -1490,16 +1520,16 @@ bool IsSafeTeleportTarget(Player const* player)
         !player->IsFlying() && !player->HasFlag(PLAYER_FLAGS, PLAYER_FLAGS_GHOST);
 }
 
-void ApplyRecruiterSpec(uint32 botGuid, Player* bot, PlayerbotAI* ai, uint8 cls, uint8 specTab,
+bool ApplyRecruiterSpec(uint32 botGuid, Player* bot, PlayerbotAI* ai, uint8 cls, uint8 specTab,
     BotRoles role, PlayerbotFactory& factory)
 {
     uint32 const specNo = RecruiterSpecNo(cls, specTab);
     if (!specNo)
-        return;
+        return false;
 
     sRandomPlayerbotMgr.SetValue(botGuid, "specNo", specNo);
     if (bot->GetLevel() < 10)
-        return;
+        return false;
 
     ai->SetForcedRole(uint8(role));
     ai->DoSpecificAction("auto talents");
@@ -1508,6 +1538,8 @@ void ApplyRecruiterSpec(uint32 botGuid, Player* bot, PlayerbotAI* ai, uint8 cls,
         factory.EnchantEquipment();
     factory.InitAmmo();
     ai->ResetStrategies();
+    TalentSpec appliedSpec(bot);
+    return appliedSpec.GetTalentPoints() > 0 && appliedSpec.highestTree() == specTab;
 }
 
 bool PrepareOnlineCompanion(CompanionContract& contract, Player* bot, PlayerbotAI* ai)
@@ -1521,7 +1553,8 @@ bool PrepareOnlineCompanion(CompanionContract& contract, Player* bot, PlayerbotA
     factory.InitializeAtCurrentLevel();
     if (contract.specTab != INVALID_SPEC_TAB)
     {
-        ApplyRecruiterSpec(contract.botGuid, bot, ai, contract.cls, contract.specTab, contract.role, factory);
+        if (!ApplyRecruiterSpec(contract.botGuid, bot, ai, contract.cls, contract.specTab, contract.role, factory))
+            return false;
     }
 
     sRandomPlayerbotMgr.SetValue(contract.botGuid, "create levelup", 0);
