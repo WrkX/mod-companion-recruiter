@@ -9,6 +9,12 @@ CompanionRecruiter.MinimumLevel = 10
 # Multiplier for the level-scaled price curve. Set to 0 for free contracts.
 CompanionRecruiter.CostMultiplier = 1.0
 
+# One-time price multiplier for a companion saved permanently to one character.
+CompanionRecruiter.PermanentCostMultiplier = 10.0
+
+# Maximum number of companions a character may own permanently.
+CompanionRecruiter.MaxOwnedCompanions = 20
+
 # Normal contract duration.
 CompanionRecruiter.LifetimeMinutes = 60
 
