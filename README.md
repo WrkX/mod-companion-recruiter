@@ -56,7 +56,10 @@ Allow module SQL updates (`Database.AutoUpdate.AllowedModules = "all"` or add th
 allowlist), and copy `mod_companion_recruiter.conf.dist` to `mod_companion_recruiter.conf` in the installed
 module config directory.
 
-The world migration creates recruiter entry `919001` in Stormwind and Orgrimmar.
+The world migrations create twelve level-60 recruiter variants (`919001` through `919012`) with the
+same `npc_companion_recruiter` gossip script. The original fixed Stormwind and Orgrimmar spawns are
+removed so the final locations can be placed by a GM. See [SPAWN_COMMANDS.md](SPAWN_COMMANDS.md)
+for the entry and display ID mapping and the in-game spawn commands.
 The character migrations create `companion_recruiter_owned`, which stores each permanent companion's
 owner, purchase metadata, role, and specialization. Existing role-only companions receive a matching
 default specialization when the new migration runs.
