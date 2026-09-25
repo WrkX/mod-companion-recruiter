@@ -56,6 +56,17 @@ Allow module SQL updates (`Database.AutoUpdate.AllowedModules = "all"` or add th
 allowlist), and copy `mod_companion_recruiter.conf.dist` to `mod_companion_recruiter.conf` in the installed
 module config directory.
 
+`AiPlayerbot.WindrunnerCompanionMode` defaults to `1` in the PlayerBots configuration. With it
+enabled, the recruiter is the only source of bot creation and login. Existing random bot accounts
+and characters stay in the database but remain offline. Recruited companions still follow and
+fight, answer their owner, and appear in `/who`. The world SQL update installs 1,000 occasional
+party conversations; missing or invalid conversation data disables only that banter. Changing
+Companion Mode requires a server restart. Set it to `0` to restore normal PlayerBots behavior.
+Read the complete dialogue with level, faction, and speaker details in
+[COMPANION_BANTER.md](docs/COMPANION_BANTER.md).
+The DungeonClear `.dc test` harness creates bots directly, so run that harness with Companion Mode
+set to `0` and restart first.
+
 The world migrations create twelve level-60 recruiter variants (`919001` through `919012`) with the
 same `npc_companion_recruiter` gossip script. The original fixed Stormwind and Orgrimmar spawns are
 removed so the final locations can be placed by a GM. See [SPAWN_COMMANDS.md](SPAWN_COMMANDS.md)

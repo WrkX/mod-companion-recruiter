@@ -26,6 +26,7 @@
 #include <chrono>
 #include <climits>
 #include <cstdint>
+#include <deque>
 #include <list>
 #include <map>
 #include <set>
@@ -183,6 +184,36 @@ bool gRecruiterSpecPathsInitialized = false;
 std::map<uint32, uint32> gManagePages;
 std::map<uint32, FillRoleSession> gFillRoleSessions;
 std::map<uint32, PermanentRecruitmentSession> gPermanentRecruitmentSessions;
+
+struct BanterLine
+{
+    uint8 speakerSlot = 0;
+    std::string text;
+};
+
+struct BanterScript
+{
+    uint32 id = 0;
+    uint8 minLevel = 1;
+    uint8 faction = 0; // 0: either faction, 1: Alliance, 2: Horde
+    uint8 speakerCount = 2;
+    std::vector<BanterLine> lines;
+};
+
+struct BanterState
+{
+    uint32 ownerGuid = 0;
+    Clock::time_point nextAttempt{};
+    Clock::time_point nextLineAt{};
+    uint32 activeScriptId = 0;
+    size_t nextLine = 0;
+    std::vector<uint32> speakers;
+    std::deque<uint32> recentScripts;
+};
+
+std::map<uint32, BanterScript> gBanterScripts;
+std::map<uint32, BanterState> gBanterStates; // group id -> one conversation
+bool gBanterReady = false;
 
 uint32 CountOwnedCompanions(uint32 ownerGuid);
 char const* RecruiterClassName(uint8 cls);
@@ -1315,6 +1346,13 @@ void LoadOwnedCompanions()
         gOwnedCompanions[companion.botGuid] = companion;
     } while (result->NextRow());
     delete result;
+
+    // The owned-companion table is authoritative. Restore an event marker if
+    // a former crash or manual event cleanup removed it, so Companion Mode's
+    // login gate does not strand a companion that has already been purchased.
+    for (auto const& pair : gOwnedCompanions)
+        if (!sRandomPlayerbotMgr.GetValue(pair.first, "companion_recruiter_owned"))
+            sRandomPlayerbotMgr.SetValue(pair.first, "companion_recruiter_owned", pair.second.ownerGuid, "", INT32_MAX);
 }
 
 char const* RecruiterClassName(uint8 cls)
@@ -1504,14 +1542,9 @@ bool IsProtected(Player* owner)
 
 Player* GetCommandMaster(Player* owner)
 {
-    Group* group = owner ? owner->GetGroup() : nullptr;
-    if (!group)
-        return owner;
-
-    Player* leader = ObjectAccessor::FindConnectedPlayer(group->GetLeaderGuid());
-    if (!leader || leader->GetGroup() != group || GetBotAI(leader))
-        return owner;
-    return leader;
+    // Keep commands, private replies, and following bound to the player who
+    // recruited the companion, even when a raid assistant recruits for a raid.
+    return owner;
 }
 
 bool IsSafeTeleportTarget(Player const* player)
@@ -1886,6 +1919,257 @@ void UpdateContracts()
         DeleteCompanion(guid);
 }
 
+void LoadBanter()
+{
+    gBanterScripts.clear();
+    gBanterStates.clear();
+    gBanterReady = false;
+    if (!sPlayerbotAIConfig.windrunnerCompanionMode || !IsEnabled())
+        return;
+
+    QueryResult* scripts = WorldDatabase.Query(
+        "SELECT id, min_level, faction, speaker_count FROM companion_banter_script ORDER BY id");
+    QueryResult* lines = WorldDatabase.Query(
+        "SELECT script_id, line_index, speaker_slot, text FROM companion_banter_line ORDER BY script_id, line_index");
+    if (!scripts || !lines)
+    {
+        delete scripts;
+        delete lines;
+        sLog.outError("Companion banter data is unavailable; recruitment will continue without banter.");
+        return;
+    }
+
+    bool valid = true;
+    do
+    {
+        Field* fields = scripts->Fetch();
+        BanterScript script;
+        script.id = fields[0].GetUInt32();
+        script.minLevel = uint8(fields[1].GetUInt32());
+        script.faction = uint8(fields[2].GetUInt32());
+        script.speakerCount = uint8(fields[3].GetUInt32());
+        if (!script.id || !script.minLevel || script.minLevel > 60 || script.faction > 2 ||
+            script.speakerCount < 1 || script.speakerCount > 4 ||
+            !gBanterScripts.emplace(script.id, std::move(script)).second)
+            valid = false;
+    } while (scripts->NextRow());
+    delete scripts;
+
+    do
+    {
+        Field* fields = lines->Fetch();
+        uint32 const scriptId = fields[0].GetUInt32();
+        uint32 const lineIndex = fields[1].GetUInt32();
+        uint32 const speakerSlot = fields[2].GetUInt32();
+        std::string const text = fields[3].GetCppString();
+        auto itr = gBanterScripts.find(scriptId);
+        if (itr == gBanterScripts.end() || lineIndex != itr->second.lines.size() ||
+            speakerSlot >= itr->second.speakerCount || text.empty() || text.size() > 255)
+        {
+            valid = false;
+            continue;
+        }
+        itr->second.lines.push_back({uint8(speakerSlot), text});
+    } while (lines->NextRow());
+    delete lines;
+
+    if (gBanterScripts.size() != 1000)
+        valid = false;
+    for (auto const& pair : gBanterScripts)
+    {
+        BanterScript const& script = pair.second;
+        if (script.lines.size() < 3 || script.lines.size() > 10)
+            valid = false;
+        std::array<bool, 4> used{};
+        for (BanterLine const& line : script.lines)
+            used[line.speakerSlot] = true;
+        for (uint8 slot = 0; slot < script.speakerCount; ++slot)
+            if (!used[slot])
+                valid = false;
+    }
+
+    if (!valid)
+    {
+        sLog.outError("Companion banter data failed validation; recruitment will continue without banter.");
+        gBanterScripts.clear();
+        return;
+    }
+
+    gBanterReady = true;
+    sLog.outString("Loaded %u companion banter conversations.", uint32(gBanterScripts.size()));
+}
+
+struct BanterCohort
+{
+    uint32 ownerGuid = 0;
+    Group* group = nullptr;
+    Team team = TEAM_BOTH_ALLOWED;
+    std::vector<uint32> bots;
+};
+
+bool IsQuietBanterGroup(Group* group)
+{
+    if (!group)
+        return false;
+    for (GroupReference* ref = group->GetFirstMember(); ref; ref = ref->next())
+        if (Player* member = ref->getSource())
+            if (member->IsInCombat() || member->IsDead())
+                return false;
+    return true;
+}
+
+void UpdateBanter()
+{
+    if (!gBanterReady || !sPlayerbotAIConfig.windrunnerCompanionMode || !IsEnabled())
+        return;
+
+    Clock::time_point const now = Clock::now();
+    std::map<std::pair<uint32, uint32>, BanterCohort> byOwnerAndGroup;
+    auto consider = [&](uint32 botGuid, uint32 ownerGuid)
+    {
+        Player* owner = ObjectAccessor::FindConnectedPlayer(ObjectGuid(HIGHGUID_PLAYER, ownerGuid));
+        Player* bot = sRandomPlayerbotMgr.GetPlayerBot(botGuid);
+        if (!owner || !bot || !GetBotAI(bot) || !owner->IsInWorld() || !bot->IsInWorld() ||
+            owner->IsInCombat() || owner->IsDead() || bot->IsInCombat() || bot->IsDead() ||
+            owner->IsBeingTeleported() || bot->IsBeingTeleported())
+            return;
+        Group* group = owner->GetGroup();
+        // Keeping each speaker within 30 yards of the owner also keeps any
+        // two speakers within 60 yards of each other.
+        if (!group || bot->GetGroup() != group || owner->GetMapId() != bot->GetMapId() ||
+            owner->GetDistance(bot) > 30.0f)
+            return;
+        BanterCohort& cohort = byOwnerAndGroup[{group->GetId(), ownerGuid}];
+        cohort.ownerGuid = ownerGuid;
+        cohort.group = group;
+        cohort.team = owner->GetTeam();
+        if (std::find(cohort.bots.begin(), cohort.bots.end(), botGuid) == cohort.bots.end())
+            cohort.bots.push_back(botGuid);
+    };
+
+    for (auto const& pair : gContracts)
+        if (pair.second.prepared && pair.second.joinedOnce)
+            consider(pair.second.botGuid, pair.second.ownerGuid);
+    for (auto const& pair : gOwnedCompanions)
+        if (pair.second.invited)
+            consider(pair.second.botGuid, pair.second.ownerGuid);
+
+    // If a raid contains companions from several owners, one cohort represents
+    // the group for this tick. This keeps the limit at one conversation per group.
+    std::map<uint32, BanterCohort> cohorts;
+    for (auto const& pair : byOwnerAndGroup)
+    {
+        BanterCohort const& cohort = pair.second;
+        if (cohort.bots.size() < 2 || !IsQuietBanterGroup(cohort.group))
+            continue;
+        auto itr = cohorts.find(pair.first.first);
+        if (itr == cohorts.end() || itr->second.bots.size() < cohort.bots.size())
+            cohorts[pair.first.first] = cohort;
+    }
+
+    for (auto itr = gBanterStates.begin(); itr != gBanterStates.end(); )
+        if (cohorts.find(itr->first) == cohorts.end())
+            itr = gBanterStates.erase(itr);
+        else
+            ++itr;
+
+    for (auto const& pair : cohorts)
+    {
+        uint32 const groupId = pair.first;
+        BanterCohort const& cohort = pair.second;
+        BanterState& state = gBanterStates[groupId];
+        if (state.ownerGuid != cohort.ownerGuid)
+        {
+            state = BanterState{};
+            state.ownerGuid = cohort.ownerGuid;
+        }
+        if (state.nextAttempt == Clock::time_point{})
+            state.nextAttempt = now + std::chrono::minutes(urand(45, 75));
+
+        if (state.activeScriptId)
+        {
+            auto scriptItr = gBanterScripts.find(state.activeScriptId);
+            bool valid = scriptItr != gBanterScripts.end();
+            for (uint32 botGuid : state.speakers)
+                if (std::find(cohort.bots.begin(), cohort.bots.end(), botGuid) == cohort.bots.end())
+                    valid = false;
+            if (!valid)
+            {
+                state.activeScriptId = 0;
+                state.speakers.clear();
+                continue;
+            }
+            if (now < state.nextLineAt)
+                continue;
+
+            BanterScript const& script = scriptItr->second;
+            BanterLine const& line = script.lines[state.nextLine];
+            Player* speaker = sRandomPlayerbotMgr.GetPlayerBot(state.speakers[line.speakerSlot]);
+            PlayerbotAI* ai = speaker ? GetBotAI(speaker) : nullptr;
+            if (!ai || !ai->SayCompanionBanter(line.text))
+            {
+                state.activeScriptId = 0;
+                state.speakers.clear();
+                continue;
+            }
+            ++state.nextLine;
+            if (state.nextLine == script.lines.size())
+            {
+                state.activeScriptId = 0;
+                state.speakers.clear();
+            }
+            else
+                state.nextLineAt = now + std::chrono::seconds(urand(2, 4));
+            continue;
+        }
+
+        if (now < state.nextAttempt)
+            continue;
+        state.nextAttempt = now + std::chrono::minutes(urand(45, 75));
+        if (urand(1, 100) > 80)
+            continue;
+
+        std::vector<uint32> eligibleScripts;
+        for (auto const& entry : gBanterScripts)
+        {
+            BanterScript const& script = entry.second;
+            if ((script.faction == 1 && cohort.team != ALLIANCE) ||
+                (script.faction == 2 && cohort.team != HORDE))
+                continue;
+            uint32 qualifying = 0;
+            for (uint32 botGuid : cohort.bots)
+                if (Player* bot = sRandomPlayerbotMgr.GetPlayerBot(botGuid))
+                    if (bot->GetLevel() >= script.minLevel)
+                        ++qualifying;
+            if (qualifying >= script.speakerCount &&
+                std::find(state.recentScripts.begin(), state.recentScripts.end(), script.id) == state.recentScripts.end())
+                eligibleScripts.push_back(script.id);
+        }
+        if (eligibleScripts.empty())
+            continue;
+
+        BanterScript const& script = gBanterScripts.at(eligibleScripts[urand(0, uint32(eligibleScripts.size() - 1))]);
+        std::vector<uint32> speakers;
+        for (uint32 botGuid : cohort.bots)
+            if (Player* bot = sRandomPlayerbotMgr.GetPlayerBot(botGuid))
+                if (bot->GetLevel() >= script.minLevel)
+                    speakers.push_back(botGuid);
+        for (uint8 slot = 0; slot < script.speakerCount; ++slot)
+        {
+            uint32 const picked = urand(slot, uint32(speakers.size() - 1));
+            std::swap(speakers[slot], speakers[picked]);
+        }
+        speakers.resize(script.speakerCount);
+        state.speakers = std::move(speakers);
+        state.activeScriptId = script.id;
+        state.nextLine = 0;
+        state.nextLineAt = now;
+        state.recentScripts.push_back(script.id);
+        if (state.recentScripts.size() > 20)
+            state.recentScripts.pop_front();
+    }
+}
+
 class CompanionRecruiterNpc : public CreatureScript
 {
 public:
@@ -2229,6 +2513,7 @@ public:
     {
         EnsureRecruiterSpecPaths();
         LoadOwnedCompanions();
+        LoadBanter();
         QueryResult* result = CharacterDatabase.PQuery(
             "SELECT DISTINCT bot FROM ai_playerbot_random_bots WHERE owner = 0 AND event = 'companion_recruiter'");
         std::vector<uint32> staleBots;
@@ -2248,6 +2533,9 @@ public:
 
     void OnUpdate(uint32 diff) override
     {
+        // Pace lines against the world tick so the 2-4 second spacing does
+        // not gain an extra second from the contract maintenance timer.
+        UpdateBanter();
         gUpdateTimer += diff;
         if (gUpdateTimer < 1000)
             return;
@@ -2357,6 +2645,23 @@ public:
 
 void Addmod_companion_recruiterScripts()
 {
+    sPlayerbotAIConfig.companionRecruiterRegistered = true;
+    sPlayerbotAIConfig.companionRecruiterAllowsLogin = [](uint32 botGuid)
+    {
+        if (!IsEnabled())
+            return false;
+
+        auto contract = gContracts.find(botGuid);
+        if (contract != gContracts.end() && contract->second.expiresAt > Clock::now() &&
+            sRandomPlayerbotMgr.GetValue(botGuid, "companion_recruiter") == contract->second.ownerGuid &&
+            ObjectAccessor::FindConnectedPlayer(ObjectGuid(HIGHGUID_PLAYER, contract->second.ownerGuid)))
+            return true;
+
+        auto owned = gOwnedCompanions.find(botGuid);
+        return owned != gOwnedCompanions.end() && owned->second.invited &&
+            sRandomPlayerbotMgr.GetValue(botGuid, "companion_recruiter_owned") == owned->second.ownerGuid &&
+            ObjectAccessor::FindConnectedPlayer(ObjectGuid(HIGHGUID_PLAYER, owned->second.ownerGuid));
+    };
     new CompanionRecruiterNpc();
     new CompanionRecruiterWorld();
     new CompanionRecruiterPlayer();
