@@ -57,3 +57,11 @@ CompanionRecruiter.ExpiryGraceMinutes = 10
 
 # One player plus this maximum must fit within the 40-player raid cap.
 CompanionRecruiter.MaxCompanionsPerPlayer = 39
+
+# Teleport a grouped companion to its owner when it is on another map or
+# instance, farther than TeleportDistance yards (clamped 30-500), has no
+# walkable path to the owner, or has been following from more than 30 yards
+# away without getting closer for StuckSeconds (clamped 2-60). The no-path and
+# stuck checks wait until neither the owner nor the companion is in combat.
+CompanionRecruiter.TeleportDistance = 100
+CompanionRecruiter.StuckSeconds = 8

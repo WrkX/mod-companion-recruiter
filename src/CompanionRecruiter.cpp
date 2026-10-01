@@ -8,6 +8,7 @@
 #include "GossipDef.h"
 #include "Group/Group.h"
 #include "Maps/Map.h"
+#include "Maps/PathFinder.h"
 #include "ObjectAccessor.h"
 #include "ObjectMgr.h"
 #include "Objects/Creature.h"
@@ -27,6 +28,7 @@
 #include <cctype>
 #include <chrono>
 #include <climits>
+#include <cmath>
 #include <cstdint>
 #include <ctime>
 #include <deque>
@@ -440,6 +442,16 @@ uint32 GraceSeconds()
 uint32 LoginTimeoutSeconds()
 {
     return uint32(std::clamp<int32>(sConfig.GetIntDefault("CompanionRecruiter.LoginTimeoutSeconds", 120), 30, 600));
+}
+
+float TeleportDistance()
+{
+    return float(std::clamp<int32>(sConfig.GetIntDefault("CompanionRecruiter.TeleportDistance", 100), 30, 500));
+}
+
+uint32 StuckSeconds()
+{
+    return uint32(std::clamp<int32>(sConfig.GetIntDefault("CompanionRecruiter.StuckSeconds", 8), 2, 60));
 }
 
 uint32 EnchantItemLevelThreshold()
@@ -1801,10 +1813,10 @@ bool IsSafeTeleportTarget(Player const* player)
         !player->IsFlying() && !player->HasFlag(PLAYER_FLAGS, PLAYER_FLAGS_GHOST);
 }
 
-void NotifyOwnerCannotLeadGroup(Player* owner)
+void NotifyOwnerCannotLeadGroup(Player* owner, Group* group, Player* bot)
 {
     static std::map<uint32, Clock::time_point> lastTold;
-    if (!owner)
+    if (!owner || !group)
         return;
 
     Clock::time_point const now = Clock::now();
@@ -1812,7 +1824,14 @@ void NotifyOwnerCannotLeadGroup(Player* owner)
     if (when != Clock::time_point{} && now < when + std::chrono::seconds(30))
         return;
     when = now;
-    SendMessage(owner, "You are not the party leader, so companions cannot join this group.");
+
+    std::string const leaderName = group->GetLeaderName();
+    sLog.outError("Companion join blocked: owner=%s guid=%u group=%u leader=%s leaderGuid=%u bot=%s guid=%u botGroup=%u",
+        owner->GetName(), owner->GetGUIDLow(), group->GetId(), leaderName.c_str(),
+        group->GetLeaderGuid().GetCounter(), bot ? bot->GetName() : "?", bot ? bot->GetGUIDLow() : 0u,
+        bot && bot->GetGroup() ? bot->GetGroup()->GetId() : 0u);
+    SendMessage(owner, "Companions can only join a group you lead (current leader: " +
+        (leaderName.empty() ? std::string("unknown") : leaderName) + ").");
 }
 
 // Direct membership avoids repeatedly sending failed invite opcodes.
@@ -1825,23 +1844,30 @@ bool EnsureCompanionInGroup(Player* owner, Player* bot)
     Group* group = owner->GetGroup();
     if (group && group->isBGGroup())
         group = owner->GetOriginalGroup();
-    if (owner->IsInGroup(bot, true))
+    if (owner->IsInGroup(bot, true) || (group && bot->GetGroup() == group))
         return true;
+    // Zoning (instance portals, summons, logins) briefly leaves either side
+    // out of the world. Group state is unreliable then; retry next update
+    // instead of reorganising groups or telling the owner they lost the lead.
+    if (!owner->IsInWorld() || !bot->IsInWorld() || owner->IsBeingTeleported() || bot->IsBeingTeleported())
+        return false;
     if (owner->HandleHardcoreInteraction(bot, true) != Player::HardcoreInteractionResult::Allowed)
         return false;
 
     if (group)
     {
-        ObjectGuid const ownerGuid = owner->GetObjectGuid();
-        if (!group->IsLeader(ownerGuid) && !group->IsAssistant(ownerGuid))
-        {
-            NotifyOwnerCannotLeadGroup(owner);
-            return false;
-        }
-
+        // A full group cannot take the companion whoever leads it.
         uint32 const capacity = group->isRaidGroup() ? MAX_RAID_SIZE : MAX_GROUP_SIZE;
         if (group->GetMembersCount() >= capacity)
             return false;
+
+        ObjectGuid const ownerGuid = owner->GetObjectGuid();
+        if (!group->IsLeader(ownerGuid) && !(group->isRaidGroup() && group->IsAssistant(ownerGuid)))
+        {
+            NotifyOwnerCannotLeadGroup(owner, group, bot);
+            return false;
+        }
+
         if (!group->HandleHardcoreInteraction(bot))
             return false;
     }
@@ -1871,13 +1897,71 @@ bool EnsureCompanionInGroup(Player* owner, Player* bot)
     return group->AddMember(bot->GetObjectGuid(), bot->GetName());
 }
 
+struct FollowProgress
+{
+    float distance = 0.0f;
+    float x = 0.0f;
+    float y = 0.0f;
+    Clock::time_point since{};
+};
+
+std::map<uint32, FollowProgress> gFollowProgress;
+
+bool HasNoPathToOwner(Player* owner, Player* bot)
+{
+    PathFinder path(bot);
+    path.calculate(owner->GetPositionX(), owner->GetPositionY(), owner->GetPositionZ());
+    return (path.getPathType() & PATHFIND_NOPATH) != 0;
+}
+
+// False when the companion should be teleported: another map or instance,
+// beyond TeleportDistance, no walkable path, or following without getting
+// any closer for StuckSeconds (wrong floor, closed door, ledge).
 bool CompanionIsWithOwner(Player* owner, Player* bot)
 {
     if (!owner || !bot || !owner->IsInWorld() || !bot->IsInWorld())
         return false;
+    uint32 const botGuid = bot->GetGUIDLow();
     if (owner->GetMapId() != bot->GetMapId() || owner->GetInstanceId() != bot->GetInstanceId())
+    {
+        gFollowProgress.erase(botGuid);
         return false;
-    return bot->GetDistance(owner) <= 160.0f;
+    }
+
+    float const distance = bot->GetDistance(owner);
+    if (distance > TeleportDistance())
+    {
+        gFollowProgress.erase(botGuid);
+        return false;
+    }
+
+    // Nearby or fighting: leave movement to the follow and combat AI.
+    if (distance <= 30.0f || bot->IsInCombat() || owner->IsInCombat())
+    {
+        gFollowProgress.erase(botGuid);
+        return true;
+    }
+
+    Clock::time_point const now = Clock::now();
+    FollowProgress& progress = gFollowProgress[botGuid];
+    float const moved = std::hypot(bot->GetPositionX() - progress.x, bot->GetPositionY() - progress.y);
+    if (progress.since == Clock::time_point{} || distance < progress.distance - 3.0f || moved > 10.0f)
+    {
+        bool const fresh = progress.since == Clock::time_point{};
+        progress = FollowProgress{distance, bot->GetPositionX(), bot->GetPositionY(), now};
+        if (fresh && HasNoPathToOwner(owner, bot))
+        {
+            gFollowProgress.erase(botGuid);
+            return false;
+        }
+        return true;
+    }
+
+    if (now < progress.since + std::chrono::seconds(StuckSeconds()))
+        return true;
+
+    gFollowProgress.erase(botGuid);
+    return false;
 }
 
 // TeleportTo on the same map id is a near teleport and stays in the bot's
