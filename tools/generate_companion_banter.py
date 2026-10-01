@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Validate companion banter SQL and export docs/COMPANION_BANTER.md.
 
-Does not invent or overwrite conversations. The world migration
-data/sql/world/0003_companion_banter.sql is the source of truth.
+Does not invent or overwrite conversations. The banter section in
+data/sql/world.sql is the source of truth.
 """
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-SQL = ROOT / "data/sql/world/0003_companion_banter.sql"
+SQL = ROOT / "data/sql/world.sql"
 OUT_MD = ROOT / "docs/COMPANION_BANTER.md"
 
 comment_re = re.compile(

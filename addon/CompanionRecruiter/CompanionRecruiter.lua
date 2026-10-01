@@ -156,7 +156,7 @@ local specializationOptions = {
     Druid = {
         { name = "Balance", icon = "Interface\\Icons\\Spell_Nature_StarFall" },
         { name = "Feral (Tank)", icon = "Interface\\Icons\\Ability_Racial_BearForm" },
-        { name = "Feral (DPS)", icon = "Interface\\Icons\\Ability_Druid_CatForm" },
+        { name = "Feral (Damage)", icon = "Interface\\Icons\\Ability_Druid_CatForm" },
         { name = "Restoration", icon = "Interface\\Icons\\Spell_Nature_HealingTouch" }
     }
 }
@@ -182,6 +182,16 @@ local pendingClass = nil
 local pickerClassAvailability = {}
 local selectedRace = nil
 
+local function ParchmentTextColor(font, r, g, b)
+    font:SetTextColor(r, g, b)
+    -- GameFont templates carry a drop shadow intended for light text on dark
+    -- panels. On parchment it produces a second dark edge around every glyph.
+    font:SetShadowOffset(0, 0)
+    font:SetShadowColor(0, 0, 0, 0)
+    local face, height = font:GetFont()
+    if face then font:SetFont(face, height, "") end
+end
+
 local function Text(parent, content, size, x, y, width, height, color)
     local font = parent:CreateFontString(nil, "OVERLAY", size or "GameFontNormal")
     font:SetPoint("TOPLEFT", parent, "TOPLEFT", x, y)
@@ -189,9 +199,74 @@ local function Text(parent, content, size, x, y, width, height, color)
     font:SetHeight(height)
     font:SetJustifyH("LEFT")
     font:SetJustifyV("TOP")
-    font:SetTextColor(color[1], color[2], color[3])
+    if color[1] < 0.5 and color[2] < 0.5 and color[3] < 0.5 then
+        ParchmentTextColor(font, color[1], color[2], color[3])
+    else
+        font:SetTextColor(color[1], color[2], color[3])
+    end
     font:SetText(content)
     return font
+end
+
+local function MoneyText(parent, content, size, x, y, width, height, color)
+    local frame = CreateFrame("Frame", nil, parent)
+    frame:SetPoint("TOPLEFT", parent, "TOPLEFT", x, y)
+    frame:SetWidth(width)
+    frame:SetHeight(height)
+    local line = CreateFrame("Frame", nil, frame)
+    line:SetHeight(height)
+    frame.align = "LEFT"
+    frame.label = Text(line, "", size, 0, 0, 0, height, color)
+    frame.coins = {}
+    local i
+    for i = 1, 3 do
+        local amount = Text(line, "", size, 0, 0, 0, height, color)
+        local icon = line:CreateTexture(nil, "ARTWORK")
+        -- Same atlas and 13px denominations as SmallMoneyFrameTemplate.
+        icon:SetTexture("Interface\\MoneyFrame\\UI-MoneyIcons")
+        icon:SetTexCoord((i - 1) * 0.25, i * 0.25, 0, 1)
+        icon:SetWidth(13)
+        icon:SetHeight(13)
+        frame.coins[i] = { amount = amount, icon = icon }
+    end
+    function frame:SetJustifyH(align)
+        self.align = align
+        local point = align == "CENTER" and "TOP" or ("TOP" .. align)
+        line:ClearAllPoints()
+        line:SetPoint(point, self, point, 0, 0)
+    end
+    function frame:SetText(value)
+        value = value or ""
+        local _, _, prefix, gold, silver, copper = string.find(value, "^(.-)(%d+)g (%d+)s (%d+)c$")
+        self.label:SetText(prefix or value)
+        self.label:SetWidth(0)
+        local offset = self.label:GetStringWidth()
+        local values = { tonumber(gold) or 0, tonumber(silver) or 0, tonumber(copper) or 0 }
+        local empty = values[1] == 0 and values[2] == 0 and values[3] == 0
+        local j
+        for j = 1, 3 do
+            local entry = self.coins[j]
+            if gold and (values[j] > 0 or (empty and j == 3)) then
+                entry.amount:SetText(tostring(values[j]))
+                entry.amount:SetWidth(0)
+                entry.amount:ClearAllPoints()
+                entry.amount:SetPoint("TOPLEFT", line, "TOPLEFT", offset, 0)
+                offset = offset + entry.amount:GetStringWidth() + 1
+                entry.icon:ClearAllPoints()
+                entry.icon:SetPoint("TOPLEFT", line, "TOPLEFT", offset, 1)
+                offset = offset + 13 + 4
+                entry.amount:Show()
+                entry.icon:Show()
+            else
+                entry.amount:Hide()
+                entry.icon:Hide()
+            end
+        end
+        line:SetWidth(math.max(1, offset - (gold and 4 or 0)))
+        self:SetJustifyH(self.align)
+    end
+    frame:SetText(content)
+    return frame
 end
 
 local function Box(parent, x, y, width, height, r, g, b, name)
@@ -212,14 +287,22 @@ end
 
 local function IconSelectionBorder(parent, icon)
     local frame = CreateFrame("Frame", nil, parent)
-    frame:SetPoint("TOPLEFT", icon, "TOPLEFT", -2, 2)
-    frame:SetPoint("BOTTOMRIGHT", icon, "BOTTOMRIGHT", 2, -2)
+    frame:SetPoint("TOPLEFT", icon, "TOPLEFT", -3, 3)
+    frame:SetPoint("BOTTOMRIGHT", icon, "BOTTOMRIGHT", 3, -3)
+    frame:SetFrameLevel(parent:GetFrameLevel() + 3)
+    frame:EnableMouse(false)
+
+    -- Match the navigation tabs' border artwork, size, and selected color.
     frame:SetBackdrop({
         edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
-        tile = true, tileSize = 16, edgeSize = 6,
-        insets = { left = 0, right = 0, top = 0, bottom = 0 }
+        tile = true, tileSize = 16, edgeSize = 16,
+        insets = { left = 5, right = 5, top = 5, bottom = 5 }
     })
-    frame:SetBackdropBorderColor(0.9, 0.68, 0.28, 0)
+    frame:SetBackdropBorderColor(1, 0.74, 0.2, 1)
+    function frame:SetSelected(selected)
+        if selected then self:Show() else self:Hide() end
+    end
+    frame:Hide()
     return frame
 end
 
@@ -350,7 +433,7 @@ rail:SetBackdropBorderColor(0.31, 0.30, 0.28, 1)
 local function StyleNavigationTab(tab, selected, hovered)
     if selected then
         tab.panel:SetBackdropColor(0.11, 0.13, 0.17, 1)
-        tab.panel:SetBackdropBorderColor(0.96, 0.72, 0.27, 1)
+        tab.panel:SetBackdropBorderColor(1, 0.74, 0.2, 1)
         tab.label:SetTextColor(1, 0.84, 0.38)
     elseif hovered then
         tab.panel:SetBackdropColor(0.10, 0.09, 0.07, 1)
@@ -465,7 +548,7 @@ fillIcon:SetHeight(40)
 local fillTitle = Text(fillCard, "Fill Group", "GameFontNormalLarge", 10, -63, 173, 25, { 1, 0.78, 0.27 })
 local fillDescription = Text(fillCard, "Recruit the missing tank, healer,\nand damage roles for your\nparty.",
     "GameFontHighlightSmall", 14, -90, 166, 39, { 0.85, 0.82, 0.77 })
-local fillCost = Text(fillCard, "", "GameFontNormalSmall", 14, -131, 166, 18, { 1, 0.78, 0.27 })
+local fillCost = MoneyText(fillCard, "", "GameFontNormalSmall", 14, -131, 166, 18, { 1, 0.78, 0.27 })
 local fillButton = Button(fillCard, "Fill Group", 22, -151, 150, 25, function()
     if preview then
         raidSize = nil
@@ -503,7 +586,7 @@ fillTitle:SetJustifyH("CENTER")
 chooseTitle:SetJustifyH("CENTER")
 fillDescription:SetJustifyH("CENTER")
 chooseDescription:SetJustifyH("CENTER")
-local chooseCost = Text(chooseCard, "", "GameFontNormalSmall", 14, -131, 166, 18, { 1, 0.78, 0.27 })
+local chooseCost = MoneyText(chooseCard, "", "GameFontNormalSmall", 14, -131, 166, 18, { 1, 0.78, 0.27 })
 local chooseButton = Button(chooseCard, "Choose Class & Spec", 22, -151, 150, 25, function()
     selectedClass = "Warrior"
     selectedSpec = nil
@@ -527,7 +610,7 @@ local pickerSpecButtons = {}
 local pickerSpecTitle = Text(picker, "Select Specialization", "GameFontHighlight", 12, -179, 390, 20, { 0.9, 0.86, 0.75 })
 local pickerSpecHint = Text(picker, "Select a class above to see its specializations.",
     "GameFontHighlightSmall", 12, -199, 390, 18, { 0.72, 0.69, 0.61 })
-local pickerCost = Text(picker, "", "GameFontNormalSmall", 108, -310, 150, 20, { 1, 0.78, 0.27 })
+local pickerCost = MoneyText(picker, "", "GameFontNormalSmall", 108, -310, 150, 20, { 0.35, 0.19, 0.045 })
 pickerCost:SetJustifyH("CENTER")
 
 local function SelectPickerClass(name)
@@ -543,7 +626,7 @@ local function SelectPickerClass(name)
         UpdatePicker()
         SelectOption(name)
     elseif HasOption("Choose another class") then
-        selectedClass = "Warrior"
+        selectedClass = name
         selectedSpec = nil
         selectedRace = nil
         pendingClass = name
@@ -659,12 +742,11 @@ end)
 UpdatePicker = function()
     local j
     local permanent = mode == "permanent"
-    pickerTitle:SetTextColor(0.23, 0.12, 0.035)
-    pickerClassTitle:SetTextColor(0.27, 0.17, 0.075)
-    pickerRaceTitle:SetTextColor(0.27, 0.17, 0.075)
-    pickerSpecTitle:SetTextColor(0.27, 0.17, 0.075)
-    pickerSpecHint:SetTextColor(0.39, 0.28, 0.16)
-    pickerCost:SetTextColor(0.35, 0.19, 0.045)
+    ParchmentTextColor(pickerTitle, 0.23, 0.12, 0.035)
+    ParchmentTextColor(pickerClassTitle, 0.27, 0.17, 0.075)
+    ParchmentTextColor(pickerRaceTitle, 0.27, 0.17, 0.075)
+    ParchmentTextColor(pickerSpecTitle, 0.27, 0.17, 0.075)
+    ParchmentTextColor(pickerSpecHint, 0.39, 0.28, 0.16)
     pickerDivider:SetVertexColor(0.43, 0.27, 0.10, 0.72)
     pickerColumnDivider:SetVertexColor(0.43, 0.27, 0.10, 0.75)
     for j = 1, table.getn(classNames) do
@@ -675,8 +757,7 @@ UpdatePicker = function()
         entry.button:EnableMouse(available and not pendingClass)
         entry.tile:SetAlpha(available and 1 or 0.3)
         local selected = selectedClass == name
-        entry.iconBorder:SetBackdropBorderColor(selected and 0.48 or 0.40,
-            selected and 0.23 or 0.36, selected and 0.045 or 0.28, selected and 1 or 0)
+        entry.iconBorder:SetSelected(selected and available)
     end
 
     if permanent then
@@ -734,9 +815,8 @@ UpdatePicker = function()
             entry.button:EnableMouse(false)
         end
         local selected = selectedRace == raceName and canSelect
-        entry.iconBorder:SetBackdropBorderColor(selected and 0.48 or 0.40,
-            selected and 0.23 or 0.36, selected and 0.045 or 0.28, selected and 1 or 0)
-        entry.label:SetTextColor(0.25, 0.14, 0.045)
+        entry.iconBorder:SetSelected(selected)
+        ParchmentTextColor(entry.label, 0.25, 0.14, 0.045)
     end
     if selectedRace and not (preview and IsRaceInCurrentFaction(selectedRace) and
         IsRaceAvailableForClass(selectedClass, selectedRace) or
@@ -781,7 +861,7 @@ UpdatePicker = function()
             entry.label:SetPoint("TOPLEFT", entry.tile, "TOPLEFT", 5,
                 permanent and (specCount > 3 and -38 or -45) or -49)
             entry.label:SetHeight(permanent and 30 or 25)
-            entry.label:SetTextColor(0.25, 0.14, 0.045)
+            ParchmentTextColor(entry.label, 0.25, 0.14, 0.045)
             entry.tile:Show()
         else
             entry.tile:Hide()
@@ -789,8 +869,7 @@ UpdatePicker = function()
         entry.button:EnableMouse(available and not pendingClass)
         entry.tile:SetAlpha(available and 1 or 0.3)
         local selected = selectedSpec == (spec and spec.name)
-        entry.iconBorder:SetBackdropBorderColor(selected and 0.48 or 0.42,
-            selected and 0.23 or 0.36, 0.045, selected and 1 or 0)
+        entry.iconBorder:SetSelected(selected and available)
     end
 
     for j = 1, table.getn(classNames) do
@@ -806,7 +885,7 @@ UpdatePicker = function()
         entry.label:ClearAllPoints()
         entry.label:SetPoint("TOPLEFT", entry.tile, "TOPLEFT", permanent and 0 or 2, -36)
         entry.label:SetWidth(permanent and 52 or 68)
-        entry.label:SetTextColor(0.25, 0.14, 0.045)
+        ParchmentTextColor(entry.label, 0.25, 0.14, 0.045)
     end
     local price = selectedSpec and CostFor(selectedSpec) or
         (specs and specs[1] and CostFor(specs[1].name)) or recruitCost
@@ -828,19 +907,6 @@ local raidButton = Button(main, "Fill Group", 11, -293, 124, 27, function()
         ShowPage(GetNumRaidMembers() > 0 and "raids" or "fillAssignments")
     else SelectOption(HasOption("Fill my raid") and "Fill my raid" or "Fill my party") end
 end)
-local dismissButton = Button(main, "Dismiss All", 285, -293, 124, 27, function()
-    StaticPopup_Show("COMPANION_RECRUITER_DISMISS")
-end)
-StaticPopupDialogs["COMPANION_RECRUITER_DISMISS"] = {
-    text = "Dismiss all your temporary companions?",
-    button1 = "Dismiss",
-    button2 = CANCEL,
-    OnAccept = function() SelectOption("Dismiss all my temporary companions") end,
-    timeout = 0,
-    whileDead = 1,
-    hideOnEscape = 1
-}
-
 local classes = NewPage("classes")
 local classesTitle = Text(classes, "Select Class & Specialization", "GameFontNormalLarge", 12, -6, 390, 26, { 1, 0.78, 0.27 })
 local classesDescription = Text(classes, "Select Class",
@@ -925,7 +991,7 @@ local roleBack = Button(roles, "Back", 11, -293, 122, 27, function()
     elseif page == "fillRolePicker" then SelectOption("Back to role assignments")
     else SelectOption("Back to recruiter") end
 end)
-local roleCost = Text(roles, "", "GameFontNormalSmall", 14, -274, 390, 23, { 0.35, 0.19, 0.045 })
+local roleCost = MoneyText(roles, "", "GameFontNormalSmall", 14, -274, 390, 23, { 0.35, 0.19, 0.045 })
 local recruitButton = Button(roles, "Recruit Companion", 246, -293, 163, 27, function()
     if preview then return end
     if selectedRole then
@@ -943,7 +1009,7 @@ for i = 1, 3 do
     local size = i == 1 and 10 or (i == 2 and 20 or 40)
     local tile = Box(raids, 12, -79 - (i - 1) * 69, 397, 59, 0.08, 0.08, 0.08)
     Text(tile, size .. " Players", "GameFontNormalLarge", 15, -15, 158, 27, { 1, 0.78, 0.27 })
-    raidCosts[size] = Text(tile, "", "GameFontNormalSmall", 136, -21, 113, 20, { 1, 0.78, 0.27 })
+    raidCosts[size] = MoneyText(tile, "", "GameFontNormalSmall", 136, -21, 113, 20, { 1, 0.78, 0.27 })
     Button(tile, "Select", 252, -15, 131, 27, function()
         raidSize = size
         selectedRole = nil
@@ -956,7 +1022,7 @@ end)
 
 local manage = NewPage("manage")
 Text(manage, "Companion Management", "GameFontNormalLarge", 12, -6, 390, 26, { 0.23, 0.12, 0.035 })
-local manageTableBg = Box(manage, 12, -47, 397, 280, 0.07, 0.065, 0.055)
+local manageTableBg = Box(manage, 12, -47, 397, 244, 0.07, 0.065, 0.055)
 manageTableBg:SetBackdropColor(0.07, 0.065, 0.055, 0.95)
 local manageListWidth = 367
 local rosterHeader = CreateFrame("Frame", nil, manage)
@@ -981,7 +1047,7 @@ manageScrollBarBg:SetBackdropColor(0.035, 0.032, 0.028, 1)
 local manageScroll = CreateFrame("ScrollFrame", "CompanionRecruiterRosterScroll", manage, "UIPanelScrollFrameTemplate")
 manageScroll:SetPoint("TOPLEFT", manageTableBg, "TOPLEFT", 5, -27)
 manageScroll:SetWidth(manageListWidth)
-manageScroll:SetHeight(248)
+manageScroll:SetHeight(212)
 local manageScrollBar = getglobal(manageScroll:GetName() .. "ScrollBar")
 manageScrollBar:ClearAllPoints()
 manageScrollBar:SetPoint("TOP", manageScrollBarBg, "TOP", 0, -16)
@@ -992,6 +1058,12 @@ manageContent:SetHeight(1)
 manageScroll:SetScrollChild(manageContent)
 local manageRows = {}
 local manageEmptyText
+local managePrevious = Button(manage, "Previous", 12, -297, 122, 27, function()
+    if not preview then SelectOption("Previous companions") end
+end)
+local manageNext = Button(manage, "Next", 286, -297, 122, 27, function()
+    if not preview then SelectOption("More companions") end
+end)
 local pendingOwnedRemovalName
 StaticPopupDialogs["COMPANION_RECRUITER_REMOVE_OWNED"] = {
     text = "Do you really want to remove %s from your available companions? This permanently deletes it.",
@@ -1009,6 +1081,8 @@ StaticPopupDialogs["COMPANION_RECRUITER_REMOVE_OWNED"] = {
 }
 
 local function RefreshManageRows()
+    if not preview and HasOption("Previous companions") then managePrevious:Show() else managePrevious:Hide() end
+    if not preview and HasOption("More companions") then manageNext:Show() else manageNext:Hide() end
     local j
     for j = 1, table.getn(manageRows) do manageRows[j]:Hide() end
     manageScroll:SetVerticalScroll(0)
@@ -1023,8 +1097,7 @@ local function RefreshManageRows()
     else
         for j = 1, table.getn(options) do
             local text = options[j]
-            if string.sub(text, 1, 5) ~= "Back " and string.sub(text, 1, 13) ~= "Buy another" and
-                string.sub(text, 1, 4) ~= "You " and string.sub(text, 1, 16) ~= "Remove companion" then
+            if string.find(text, "^.- %- .- / .- %[(.-)%]$") then
                 table.insert(rowTexts, text)
             end
         end
@@ -1110,7 +1183,7 @@ local function RefreshManageRows()
     if table.getn(rowTexts) == 0 then
         if not manageEmptyText then
             manageEmptyText = Text(manageContent, "No permanent companions yet. Buy one from Permanent Recruitment.",
-                "GameFontHighlight", 16, -48, 335, 45, { 0.27, 0.17, 0.075 })
+                "GameFontHighlight", 16, -48, 335, 45, { 1, 1, 1 })
         end
         manageEmptyText:Show()
     end
@@ -1335,7 +1408,7 @@ fillNextButton = Button(fillAssignments, "More", 105, -280, 88, 25, function()
     if preview then return end
     SelectOption("More members")
 end)
-fillCostText = Text(fillAssignments, "", "GameFontNormalSmall", 202, -283, 207, 18, { 0.35, 0.19, 0.045 })
+fillCostText = MoneyText(fillAssignments, "", "GameFontNormalSmall", 202, -283, 207, 18, { 0.35, 0.19, 0.045 })
 fillCostText:SetJustifyH("RIGHT")
 local fillCancelButton = Button(fillAssignments, "Cancel", 11, -307, 122, 27, function()
     if preview then ShowPage("main") else SelectOption("Back to recruiter") end
@@ -1382,9 +1455,11 @@ local function ReadOptions()
 end
 
 local function IsRecruiterMenu()
-    return HasOption("Recruit a tank companion") or
+    -- Permanent recruitment can arrive after the previous gossip was closed.
+    -- Identify its own action instead of depending on the previous page's state.
+    return HasOption("Recruit a tank companion") or HasOption("Recruit permanent companion") or
         (active and (HasOption("Back to recruiter") or HasOption("Confirm Roles") or
-            HasOption("Set role to Tank")))
+            HasOption("Set role to Tank") or HasOption("Buy another companion")))
 end
 
 local function HasClassOption()
@@ -1422,9 +1497,8 @@ ShowPage = function(name)
             local selected = classNames[j] == selectedClass
             entry.icon:EnableMouse(false)
             entry.tile:SetAlpha(selected and 1 or 0.35)
-            entry.label:SetTextColor(0.25, 0.14, 0.045)
-            entry.iconBorder:SetBackdropBorderColor(selected and 1 or 0.40,
-                selected and 0.74 or 0.36, selected and 0.24 or 0.28, selected and 1 or 0)
+            ParchmentTextColor(entry.label, 0.25, 0.14, 0.045)
+            entry.iconBorder:SetSelected(selected)
         end
         for j = 1, 3 do
             local entry = roleButtons[roleNames[j]]
@@ -1450,9 +1524,9 @@ ShowPage = function(name)
         pages.raids:Show()
     elseif name == "classes" then
         classGrid:Show()
-        classesTitle:SetTextColor(0.18, 0.10, 0.03)
-        classesDescription:SetTextColor(0.22, 0.14, 0.06)
-        classHint:SetTextColor(0.22, 0.14, 0.06)
+        ParchmentTextColor(classesTitle, 0.18, 0.10, 0.03)
+        ParchmentTextColor(classesDescription, 0.22, 0.14, 0.06)
+        ParchmentTextColor(classHint, 0.22, 0.14, 0.06)
         if mode == "permanent" then
             classesDescription:SetText("Purchase a companion. Future invitations are free.")
         else
@@ -1466,10 +1540,8 @@ ShowPage = function(name)
             local entry = classButtons[className]
             local selected = selectedClass == className
             entry.tile:SetAlpha(available and 1 or 0.3)
-            entry.iconBorder:SetBackdropBorderColor(selected and (mode == "permanent" and 0.48 or 1) or 0.40,
-                selected and (mode == "permanent" and 0.23 or 0.74) or 0.36,
-                selected and (mode == "permanent" and 0.045 or 0.24) or 0.28, selected and 1 or 0)
-            entry.label:SetTextColor(0.25, 0.14, 0.045)
+            entry.iconBorder:SetSelected(selected and available)
+            ParchmentTextColor(entry.label, 0.25, 0.14, 0.045)
             entry.icon:EnableMouse(available)
         end
         pages.classes:Show()
@@ -1502,7 +1574,6 @@ local view = {
     fillButton = fillButton,
     raidButton = raidButton,
     mainDescription = mainDescription,
-    dismissButton = dismissButton,
     chooseButton = chooseButton
 }
 
@@ -1588,11 +1659,25 @@ local function SyncMenu()
         view.mainDescription:SetText(temporaryDescription)
         view.fillButton:Enable()
         view.raidButton:Enable()
-        view.dismissButton:Enable()
         view.raidButton:Hide()
-        if HasOption("Dismiss all my temporary companions") then view.dismissButton:Show() else view.dismissButton:Hide() end
         if HasOption("Choose a companion's class and specialization") then view.chooseButton:Enable() else view.chooseButton:Disable() end
         ShowPage("main")
+    elseif HasOption("Recruit permanent companion") then
+        mode = "permanent"
+        if HasClassOption() and not HasOption("Race:") and not HasOption("Race unavailable:") then
+            -- The class catalogue and details travel in separate, bounded
+            -- server responses. Keep a single picker visible throughout.
+            if not selectedClass or not HasOption(selectedClass) then selectedClass = "Warrior" end
+            selectedSpec = nil
+            selectedRace = nil
+            ShowPage("picker")
+            UpdatePicker()
+            view.window:Show()
+            SelectOption(selectedClass)
+            return
+        end
+        ShowPage("picker")
+        UpdatePicker()
     elseif mode == "manage" then
         ShowPage("manage")
     elseif mode == "permanent" and HasOption("Race:") then
@@ -1638,6 +1723,19 @@ local function SyncMenu()
     end
     view.window:Show()
 end
+
+-- Keep the native gossip frame from opening for recruiter menus. Making it
+-- transparent in our own event handler is not sufficient: the stock handler
+-- can run afterwards, and its children still belong to the native panel.
+-- Do not Hide() the panel here; its OnHide can close the NPC conversation.
+local stockGossipOnEvent = GossipFrame:GetScript("OnEvent")
+GossipFrame:SetScript("OnEvent", function()
+    if event == "GOSSIP_SHOW" then
+        ReadOptions()
+        if IsRecruiterMenu() then return end
+    end
+    if stockGossipOnEvent then stockGossipOnEvent() end
+end)
 
 CR:SetScript("OnEvent", function()
     if event == "GOSSIP_SHOW" then
@@ -1689,8 +1787,6 @@ SlashCmdList["COMPANIONRECRUITERDEBUG"] = function()
     chooseButton:Enable()
     raidButton:Disable()
     raidButton:Hide()
-    dismissButton:Disable()
-    dismissButton:Hide()
     local raid = GetNumRaidMembers() > 0
     fillTitle:SetText(raid and "Fill Raid" or "Fill Group")
     fillButton:SetText(raid and "Fill Raid" or "Fill Group")

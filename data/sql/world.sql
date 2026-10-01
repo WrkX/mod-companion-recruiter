@@ -1,3 +1,145 @@
+-- BEGIN SOURCE: data/sql/world/0001_companion_recruiter.sql
+-- TortoiseWoW / MaNGOS schema. Creates one neutral recruiter and two capital spawns.
+SET @RECRUITER_ENTRY := 919001;
+SET @SOURCE_ENTRY := 20102;
+SET @STORMWIND_GUID := 9190001;
+SET @ORGRIMMAR_GUID := 9190002;
+SET @GOSSIP_TEXT := 919100;
+
+DELETE FROM `creature` WHERE `guid` IN (@STORMWIND_GUID, @ORGRIMMAR_GUID);
+DELETE FROM `creature_template` WHERE `entry` = @RECRUITER_ENTRY;
+DELETE FROM `npc_text` WHERE `ID` = @GOSSIP_TEXT;
+DELETE FROM `broadcast_text` WHERE `entry` = @GOSSIP_TEXT;
+
+DROP TEMPORARY TABLE IF EXISTS `_companion_recruiter_template`;
+CREATE TEMPORARY TABLE `_companion_recruiter_template` LIKE `creature_template`;
+INSERT INTO `_companion_recruiter_template` SELECT * FROM `creature_template` WHERE `entry` = @SOURCE_ENTRY;
+UPDATE `_companion_recruiter_template`
+SET `entry` = @RECRUITER_ENTRY,
+    `display_id1` = 2027,
+    `display_id2` = 0,
+    `display_id3` = 0,
+    `display_id4` = 0,
+    `name` = 'Companion Recruiter',
+    `subname` = 'Companion Guild',
+    `gossip_menu_id` = 0,
+    `level_min` = 60,
+    `level_max` = 60,
+    `faction` = 35,
+    `npc_flags` = `npc_flags` | 1,
+    `unit_flags` = 0,
+    `dynamic_flags` = 0,
+    -- Source entry 20102 is an invisible spawn point; retain its other flags.
+    `flags_extra` = `flags_extra` & ~128,
+    `phase_quest_id` = 0,
+    `ai_name` = '',
+    `movement_type` = 0,
+    `script_name` = 'npc_companion_recruiter'
+WHERE `entry` = @SOURCE_ENTRY;
+INSERT INTO `creature_template` SELECT * FROM `_companion_recruiter_template`;
+DROP TEMPORARY TABLE `_companion_recruiter_template`;
+
+INSERT INTO `broadcast_text`
+    (`entry`, `male_text`, `female_text`, `chat_type`, `sound_id`, `language_id`,
+     `emote_id1`, `emote_id2`, `emote_id3`, `emote_delay1`, `emote_delay2`, `emote_delay3`)
+VALUES
+    (@GOSSIP_TEXT,
+     'The roads are dangerous, $N. The Companion Guild keeps blades, prayers, and spells ready for those with coin and cause.',
+     '', 0, 0, 0, 0, 0, 0, 0, 0, 0);
+
+INSERT INTO `npc_text`
+    (`ID`, `BroadcastTextID0`, `Probability0`, `BroadcastTextID1`, `Probability1`,
+     `BroadcastTextID2`, `Probability2`, `BroadcastTextID3`, `Probability3`,
+     `BroadcastTextID4`, `Probability4`, `BroadcastTextID5`, `Probability5`,
+     `BroadcastTextID6`, `Probability6`, `BroadcastTextID7`, `Probability7`)
+VALUES
+    (@GOSSIP_TEXT, @GOSSIP_TEXT, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+
+INSERT INTO `creature`
+    (`guid`, `id`, `id2`, `id3`, `id4`, `map`, `position_x`, `position_y`, `position_z`,
+     `orientation`, `spawntimesecsmin`, `spawntimesecsmax`, `wander_distance`,
+     `health_percent`, `mana_percent`, `movement_type`, `spawn_flags`, `visibility_mod`)
+VALUES
+    (@STORMWIND_GUID, @RECRUITER_ENTRY, 0, 0, 0, 0, -8913.23, 554.633, 93.7944,
+     0.6591, 300, 300, 0, 100, 100, 0, 0, 0),
+    (@ORGRIMMAR_GUID, @RECRUITER_ENTRY, 0, 0, 0, 1, 1503.89, -4415.43, 22.6348,
+     0.1890, 300, 300, 0, 100, 100, 0, 0, 0);
+-- END SOURCE: data/sql/world/0001_companion_recruiter.sql
+
+-- BEGIN SOURCE: data/sql/world/0002_companion_recruiter_variants.sql
+-- Twelve level-60 recruiter variants. The shared script supplies the gossip
+-- options used by the Companion Recruiter addon. Spawns are placed by GMs and
+-- recorded in a later migration after their positions have been approved.
+-- 919001-919005: Alliance; 919006-919010: Horde; 919011-919012: neutral.
+
+-- Retire the two fixed spawns created by 0001; the new placement set is manual.
+DELETE FROM `creature` WHERE `guid` IN (9190001, 9190002) AND `id` = 919001;
+
+-- Keep the original recruiter as the Human variant so its existing gossip
+-- text and level-60 template remain the source for every new variant.
+UPDATE `creature_template`
+SET `display_id1` = 12954,
+    `display_id2` = 0,
+    `display_id3` = 0,
+    `display_id4` = 0,
+    `level_min` = 60,
+    `level_max` = 60,
+    `faction` = 12,
+    `npc_flags` = `npc_flags` | 1,
+    `script_name` = 'npc_companion_recruiter'
+WHERE `entry` = 919001;
+
+DELETE FROM `creature_template` WHERE `entry` BETWEEN 919002 AND 919012;
+DROP TEMPORARY TABLE IF EXISTS `_companion_recruiter_variants`;
+CREATE TEMPORARY TABLE `_companion_recruiter_variants` LIKE `creature_template`;
+INSERT INTO `_companion_recruiter_variants` SELECT * FROM `creature_template` WHERE `entry` = 919001;
+
+-- Alliance: Dwarf, Gnome, High Elf, Night Elf.
+UPDATE `_companion_recruiter_variants` SET `entry` = 919002, `display_id1` = 12549;
+INSERT INTO `creature_template` SELECT * FROM `_companion_recruiter_variants`;
+UPDATE `_companion_recruiter_variants` SET `entry` = 919003, `display_id1` = 15453;
+INSERT INTO `creature_template` SELECT * FROM `_companion_recruiter_variants`;
+UPDATE `_companion_recruiter_variants` SET `entry` = 919004, `display_id1` = 18226;
+INSERT INTO `creature_template` SELECT * FROM `_companion_recruiter_variants`;
+UPDATE `_companion_recruiter_variants` SET `entry` = 919005, `display_id1` = 15459;
+INSERT INTO `creature_template` SELECT * FROM `_companion_recruiter_variants`;
+
+-- Horde: Orc, Troll, Goblin, Tauren, Undead.
+UPDATE `_companion_recruiter_variants` SET `entry` = 919006, `display_id1` = 12165, `faction` = 29;
+INSERT INTO `creature_template` SELECT * FROM `_companion_recruiter_variants`;
+UPDATE `_companion_recruiter_variants` SET `entry` = 919007, `display_id1` = 11083;
+INSERT INTO `creature_template` SELECT * FROM `_companion_recruiter_variants`;
+UPDATE `_companion_recruiter_variants` SET `entry` = 919008, `display_id1` = 7179;
+INSERT INTO `creature_template` SELECT * FROM `_companion_recruiter_variants`;
+UPDATE `_companion_recruiter_variants` SET `entry` = 919009, `display_id1` = 2096, `scale` = 1.35;
+INSERT INTO `creature_template` SELECT * FROM `_companion_recruiter_variants`;
+UPDATE `_companion_recruiter_variants` SET `entry` = 919010, `display_id1` = 8672;
+INSERT INTO `creature_template` SELECT * FROM `_companion_recruiter_variants`;
+
+-- Neutral variants.
+UPDATE `_companion_recruiter_variants` SET `entry` = 919011, `display_id1` = 20577, `faction` = 35;
+INSERT INTO `creature_template` SELECT * FROM `_companion_recruiter_variants`;
+UPDATE `_companion_recruiter_variants` SET `entry` = 919012, `display_id1` = 10796;
+INSERT INTO `creature_template` SELECT * FROM `_companion_recruiter_variants`;
+
+DROP TEMPORARY TABLE `_companion_recruiter_variants`;
+
+-- Also repair worlds whose original recruiter inherited the invisible flag
+-- from source entry 20102 (Trash / Spawn Point). Keep all other flags and spawns.
+UPDATE `creature_template`
+SET `flags_extra` = `flags_extra` & ~128,
+    `phase_quest_id` = 0,
+    `subname` = 'Companion Guild'
+WHERE `entry` BETWEEN 919001 AND 919012
+  AND `script_name` = 'npc_companion_recruiter';
+
+UPDATE `broadcast_text`
+SET `male_text` = REPLACE(`male_text`, 'Adventure Guild', 'Companion Guild'),
+    `female_text` = REPLACE(`female_text`, 'Adventure Guild', 'Companion Guild')
+WHERE `entry` = 919100;
+-- END SOURCE: data/sql/world/0002_companion_recruiter_variants.sql
+
+-- BEGIN SOURCE: data/sql/world/0003_companion_banter.sql
 -- 1,000 original, level- and faction-gated companion party conversations.
 -- Hand-curated party banter; tools/generate_companion_banter.py validates and writes the docs.
 CREATE TABLE IF NOT EXISTS `companion_banter_script` (
@@ -8532,3 +8674,119 @@ INSERT INTO `companion_banter_line` (`script_id`,`line_index`,`speaker_slot`,`te
 (1000,1,1,'They sleep in their armor.'),
 (1000,2,0,'That can''t be comfortable.'),
 (1000,3,1,'Comfort isn''t the doctrine.');
+-- END SOURCE: data/sql/world/0003_companion_banter.sql
+
+-- BEGIN SOURCE: data/sql/world/0004_companion_recruiter_display_ids.sql
+-- Update existing recruiter templates to the approved Goblin and neutral models.
+UPDATE `creature_template`
+SET `display_id1` = 7179
+WHERE `entry` = 919008
+  AND `script_name` = 'npc_companion_recruiter';
+
+UPDATE `creature_template`
+SET `display_id1` = 20577
+WHERE `entry` = 919011
+  AND `script_name` = 'npc_companion_recruiter';
+
+UPDATE `creature_template`
+SET `display_id1` = 10796
+WHERE `entry` = 919012
+  AND `script_name` = 'npc_companion_recruiter';
+-- END SOURCE: data/sql/world/0004_companion_recruiter_display_ids.sql
+
+-- BEGIN SOURCE: data/sql/world/0005_companion_recruiter_spawns.sql
+-- Snapshot of the 78 manually placed Companion Recruiter spawns.
+-- INSERT IGNORE keeps the already-present rows intact on the source world and skips GUID conflicts elsewhere.
+INSERT IGNORE INTO `creature`
+    (`guid`, `id`, `id2`, `id3`, `id4`, `map`, `position_x`, `position_y`, `position_z`,
+     `orientation`, `spawntimesecsmin`, `spawntimesecsmax`, `wander_distance`,
+     `health_percent`, `mana_percent`, `movement_type`, `spawn_flags`, `visibility_mod`)
+VALUES
+(2902661, 919001, 0, 0, 0, 0, -9460.2, 26.4689, 56.3401, 5.4302, 120, 120, 0.0, 100.0, 100.0, 0, 0, 0.0),
+(2902674, 919001, 0, 0, 0, 0, -8858.9, 676.118, 98.162, 0.607746, 120, 120, 0.0, 100.0, 100.0, 0, 0, 0.0),
+(2902679, 919001, 0, 0, 0, 0, -9246.43, -2156.47, 63.9335, 4.66392, 120, 120, 0.0, 100.0, 100.0, 0, 0, 0.0),
+(2902688, 919001, 0, 0, 0, 0, -10650.4, 1180.24, 34.4517, 2.48035, 120, 120, 0.0, 100.0, 100.0, 0, 0, 0.0),
+(2902690, 919001, 0, 0, 0, 0, -3814.0, -820.179, 9.46845, 3.87835, 120, 120, 0.0, 100.0, 100.0, 0, 0, 0.0),
+(2902712, 919001, 0, 0, 0, 0, -10510.0, -1172.91, 31.3228, 2.75284, 120, 120, 0.0, 100.0, 100.0, 0, 0, 0.0),
+(2902731, 919001, 0, 0, 0, 0, -7654.91, 642.958, 47.6181, 1.9086, 120, 120, 0.0, 100.0, 100.0, 0, 0, 0.0),
+(2902677, 919002, 0, 0, 0, 0, -5605.53, -525.325, 399.659, 3.2044, 120, 120, 0.0, 100.0, 100.0, 0, 0, 0.0),
+(2902682, 919002, 0, 0, 0, 0, -4836.93, -858.709, 510.248, 3.44042, 120, 120, 0.0, 100.0, 100.0, 0, 0, 0.0),
+(2902687, 919002, 0, 0, 0, 0, -5387.69, -2953.38, 322.063, 1.29989, 120, 120, 0.0, 100.0, 100.0, 0, 0, 0.0),
+(2902711, 919002, 0, 0, 0, 0, 381.801, -2099.07, 131.562, 3.47541, 120, 120, 0.0, 100.0, 100.0, 0, 0, 0.0),
+(2902670, 919003, 0, 0, 0, 0, -9184.79, 2558.21, 13.1959, 1.69783, 120, 120, 0.0, 100.0, 100.0, 0, 0, 0.0),
+(2902691, 919003, 0, 0, 0, 1, -3626.55, -4450.91, 14.249, 3.08117, 120, 120, 0.0, 100.0, 100.0, 0, 0, 0.0),
+(2902730, 919003, 0, 0, 0, 0, -4942.03, -4827.71, 172.058, 2.89584, 120, 120, 0.0, 100.0, 100.0, 0, 0, 0.0),
+(2902733, 919003, 0, 0, 0, 0, -4908.16, 599.538, 384.86, 1.69496, 120, 120, 0.0, 100.0, 100.0, 0, 0, 0.0),
+(2902662, 919004, 0, 0, 0, 0, -8538.0, 556.503, 102.734, 1.91005, 120, 120, 0.0, 100.0, 100.0, 0, 0, 0.0),
+(2902663, 919004, 0, 0, 0, 0, 3196.19, -2503.97, 112.869, 3.12585, 120, 120, 0.0, 100.0, 100.0, 0, 0, 0.0),
+(2902675, 919004, 0, 0, 0, 0, -864.342, -558.955, 11.6917, 6.2689, 120, 120, 0.0, 100.0, 100.0, 0, 0, 0.0),
+(2902689, 919004, 0, 0, 0, 0, -3896.75, -1865.16, 143.738, 6.20392, 120, 120, 0.0, 100.0, 100.0, 0, 0, 0.0),
+(2902717, 919004, 0, 0, 0, 0, 4243.53, -2774.87, 104.187, 6.19871, 120, 120, 0.0, 100.0, 100.0, 0, 0, 0.0),
+(2902732, 919004, 0, 0, 0, 0, 4155.5, -2704.14, 20.1276, 5.27952, 120, 120, 0.0, 100.0, 100.0, 0, 0, 0.0),
+(2902665, 919005, 0, 0, 0, 1, 922.59, -836.065, 165.841, 3.43201, 120, 120, 0.0, 100.0, 100.0, 0, 0, 0.0),
+(2902681, 919005, 0, 0, 0, 1, 2719.27, 1470.19, 241.868, 3.68154, 120, 120, 0.0, 100.0, 100.0, 0, 0, 0.0),
+(2902696, 919005, 0, 0, 0, 1, 9771.27, 954.365, 1306.44, 3.2181, 120, 120, 0.0, 100.0, 100.0, 0, 0, 0.0),
+(2902697, 919005, 0, 0, 0, 1, 2788.16, -431.37, 116.512, 5.99527, 120, 120, 0.0, 100.0, 100.0, 0, 0, 0.0),
+(2902699, 919005, 0, 0, 0, 1, 216.915, 1286.46, 190.436, 4.75276, 120, 120, 0.0, 100.0, 100.0, 0, 0, 0.0),
+(2902704, 919005, 0, 0, 0, 1, 6397.51, 505.588, 8.23622, 4.49476, 120, 120, 0.0, 100.0, 100.0, 0, 0, 0.0),
+(2902707, 919005, 0, 0, 0, 1, -4416.63, 3292.34, 12.3437, 6.12554, 120, 120, 0.0, 100.0, 100.0, 0, 0, 0.0),
+(2902715, 919005, 0, 0, 0, 1, 8904.01, -5991.95, 12.474, 4.68525, 120, 120, 0.0, 100.0, 100.0, 0, 0, 0.0),
+(2902660, 919006, 0, 0, 0, 1, 1641.67, -4444.72, 15.4066, 3.53502, 120, 120, 0.0, 100.0, 100.0, 0, 0, 0.0),
+(2902678, 919006, 0, 0, 0, 1, -428.608, -2661.4, 96.5724, 3.39447, 120, 120, 0.0, 100.0, 100.0, 0, 0, 0.0),
+(2902693, 919006, 0, 0, 0, 0, -10498.5, -3247.48, 27.7266, 5.14048, 120, 120, 0.0, 100.0, 100.0, 0, 0, 0.0),
+(2902706, 919006, 0, 0, 0, 0, -6679.83, -2224.16, 272.047, 2.32657, 120, 120, 0.0, 100.0, 100.0, 0, 0, 0.0),
+(2902719, 919006, 0, 0, 0, 0, -14031.9, 2302.55, 62.7556, 2.56387, 120, 120, 0.0, 100.0, 100.0, 0, 0, 0.0),
+(2902729, 919006, 0, 0, 0, 0, -7478.03, -2873.31, 228.546, 2.26831, 120, 120, 0.0, 100.0, 100.0, 0, 0, 0.0),
+(2902734, 919006, 0, 0, 0, 0, -3981.06, -5309.53, 196.772, 2.30365, 120, 120, 0.0, 100.0, 100.0, 0, 0, 0.0),
+(2902673, 919007, 0, 0, 0, 0, -921.351, -3519.47, 72.81, 4.59993, 120, 120, 0.0, 100.0, 100.0, 0, 0, 0.0),
+(2902685, 919007, 0, 0, 0, 1, -4430.88, 251.086, 37.1041, 1.09206, 120, 120, 0.0, 100.0, 100.0, 0, 0, 0.0),
+(2902695, 919007, 0, 0, 0, 1, 2346.11, -2582.76, 102.773, 1.54534, 120, 120, 0.0, 100.0, 100.0, 0, 0, 0.0),
+(2902710, 919007, 0, 0, 0, 0, -12436.0, 230.651, 1.19897, 6.02893, 120, 120, 0.0, 100.0, 100.0, 0, 0, 0.0),
+(2902720, 919007, 0, 0, 0, 0, -595.865, -4598.22, 10.4308, 0.121279, 120, 120, 0.0, 100.0, 100.0, 0, 0, 0.0),
+(2902727, 919007, 0, 0, 0, 0, -740.757, -2692.11, 232.714, 1.27785, 120, 120, 0.0, 100.0, 100.0, 0, 0, 0.0),
+(2902736, 919007, 0, 0, 0, 0, -8527.52, 2540.87, 55.6158, 5.73033, 120, 120, 0.0, 100.0, 100.0, 0, 0, 0.0),
+(2902664, 919008, 0, 0, 0, 1, -336.05, -7462.01, 74.356, 4.66523, 120, 120, 0.0, 100.0, 100.0, 0, 0, 0.0),
+(2902671, 919008, 0, 0, 0, 1, -9260.77, -1889.88, 130.094, 4.82934, 120, 120, 0.0, 100.0, 100.0, 0, 0, 0.0),
+(2902683, 919008, 0, 0, 0, 1, -4609.77, -3195.3, 34.9259, 1.92025, 120, 120, 0.0, 100.0, 100.0, 0, 0, 0.0),
+(2902684, 919008, 0, 0, 0, 1, -7168.58, -3842.77, 8.77429, 0.661267, 120, 120, 0.0, 100.0, 100.0, 0, 0, 0.0),
+(2902686, 919008, 0, 0, 0, 1, 321.814, -4702.17, 15.823, 5.67613, 120, 120, 0.0, 100.0, 100.0, 0, 0, 0.0),
+(2902723, 919008, 0, 0, 0, 1, 1361.01, 1753.2, 143.553, 3.55474, 120, 120, 0.0, 100.0, 100.0, 0, 0, 0.0),
+(2902659, 919009, 0, 0, 0, 1, -1312.84, 30.8908, 137.435, 0.456073, 120, 120, 0.0, 100.0, 100.0, 0, 0, 0.0),
+(2902672, 919009, 0, 0, 0, 1, -5457.62, -2461.6, 89.2772, 0.595966, 120, 120, 0.0, 100.0, 100.0, 0, 0, 0.0),
+(2902680, 919009, 0, 0, 0, 1, -2378.76, -2001.3, 104.932, 0.967044, 120, 120, 0.0, 100.0, 100.0, 0, 0, 0.0),
+(2902692, 919009, 0, 0, 0, 1, 917.333, 902.163, 105.421, 6.23925, 120, 120, 0.0, 100.0, 100.0, 0, 0, 0.0),
+(2902694, 919009, 0, 0, 0, 1, -2356.78, -370.014, -7.77117, 4.09276, 120, 120, 0.0, 100.0, 100.0, 0, 0, 0.0),
+(2902708, 919009, 0, 0, 0, 1, -1575.68, 3139.37, 47.123, 0.535854, 120, 120, 0.0, 100.0, 100.0, 0, 0, 0.0),
+(2902714, 919009, 0, 0, 0, 1, 8295.68, -6586.0, 22.6741, 5.41881, 120, 120, 0.0, 100.0, 100.0, 0, 0, 0.0),
+(2902668, 919010, 0, 0, 0, 0, -1334.36, 1180.77, 127.532, 4.57789, 120, 120, 0.0, 100.0, 100.0, 0, 0, 0.0),
+(2902676, 919010, 0, 0, 0, 0, 576.372, 1583.23, 131.749, 3.4698, 120, 120, 0.0, 100.0, 100.0, 0, 0, 0.0),
+(2902700, 919010, 0, 0, 0, 0, 1968.2, 2813.19, 2.57416, 1.61824, 120, 120, 0.0, 100.0, 100.0, 0, 0, 0.0),
+(2902701, 919010, 0, 0, 0, 0, 1648.06, 218.73, -43.1031, 6.1704, 120, 120, 0.0, 100.0, 100.0, 0, 0, 0.0),
+(2902702, 919010, 0, 0, 0, 0, 2260.19, 249.555, 33.6339, 1.38811, 120, 120, 0.0, 100.0, 100.0, 0, 0, 0.0),
+(2902703, 919010, 0, 0, 0, 1, 10143.5, 2220.66, 1329.98, 3.48748, 120, 120, 0.0, 100.0, 100.0, 0, 0, 0.0),
+(2902705, 919010, 0, 0, 0, 0, -13.5685, -928.568, 57.1723, 4.7995, 120, 120, 0.0, 100.0, 100.0, 0, 0, 0.0),
+(2902666, 919011, 0, 0, 0, 1, -6868.26, 737.922, 45.6625, 4.46481, 120, 120, 0.0, 100.0, 100.0, 0, 0, 0.0),
+(2902669, 919011, 0, 0, 0, 0, -14547.8, -545.556, 0.595326, 2.2319, 120, 120, 0.0, 100.0, 100.0, 0, 0, 0.0),
+(2902713, 919011, 0, 0, 0, 1, 6702.12, -4680.02, 721.013, 5.21618, 120, 120, 0.0, 100.0, 100.0, 0, 0, 0.0),
+(2902721, 919011, 0, 0, 0, 1, 911.569, -5075.34, 6.02403, 2.47119, 120, 120, 0.0, 100.0, 100.0, 0, 0, 0.0),
+(2902725, 919011, 0, 0, 0, 1, 4485.52, -5086.62, 284.753, 4.01498, 120, 120, 0.0, 100.0, 100.0, 0, 0, 0.0),
+(2902728, 919011, 0, 0, 0, 1, 5502.86, -3776.17, 1610.05, 2.05885, 120, 120, 0.0, 100.0, 100.0, 0, 0, 0.0),
+(2902737, 919011, 0, 0, 0, 1, -9252.38, -1875.22, 129.243, 5.2378, 120, 120, 0.0, 100.0, 100.0, 0, 0, 0.0),
+(2902667, 919012, 0, 0, 0, 1, -8488.37, -4618.07, -207.371, 3.07072, 120, 120, 0.0, 100.0, 100.0, 0, 0, 0.0),
+(2902709, 919012, 0, 0, 0, 0, -14454.1, 492.562, 15.1161, 0.849225, 120, 120, 0.0, 100.0, 100.0, 0, 0, 0.0),
+(2902716, 919012, 0, 0, 0, 0, 2307.05, -5340.33, 90.8799, 3.11131, 120, 120, 0.0, 100.0, 100.0, 0, 0, 0.0),
+(2902718, 919012, 0, 0, 0, 0, 2905.18, -736.398, 153.984, 5.4675, 120, 120, 0.0, 100.0, 100.0, 0, 0, 0.0),
+(2902722, 919012, 0, 0, 0, 0, -1686.12, 2020.26, 54.892, 0.467338, 120, 120, 0.0, 100.0, 100.0, 0, 0, 0.0),
+(2902724, 919012, 0, 0, 0, 1, 6694.07, -6403.56, 30.4083, 2.07112, 120, 120, 0.0, 100.0, 100.0, 0, 0, 0.0),
+(2902726, 919012, 0, 0, 0, 1, 654.418, 851.336, 121.97, 1.03674, 120, 120, 0.0, 100.0, 100.0, 0, 0, 0.0),
+(2902735, 919012, 0, 0, 0, 1, -8869.18, -6511.37, 15.0808, 2.35313, 120, 120, 0.0, 100.0, 100.0, 0, 0, 0.0);
+-- END SOURCE: data/sql/world/0005_companion_recruiter_spawns.sql
+
+-- BEGIN SOURCE: data/sql/world/0006_companion_recruiter_tauren_scale.sql
+-- Match the Tauren recruiter's scale to other creatures using display 2096.
+UPDATE `creature_template`
+SET `scale` = 1.35
+WHERE `entry` = 919009
+  AND `script_name` = 'npc_companion_recruiter';
+-- END SOURCE: data/sql/world/0006_companion_recruiter_tauren_scale.sql
+

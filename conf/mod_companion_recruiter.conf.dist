@@ -15,8 +15,9 @@ CompanionRecruiter.CostMultiplier = 1.0
 # This does not depend on the owner's level or the temporary cost multiplier.
 CompanionRecruiter.PermanentCostGold = 75
 
-# Maximum number of companions a character may own permanently.
-CompanionRecruiter.MaxOwnedCompanions = 20
+# Maximum number of companions a character may buy permanently. Lowering this
+# does not prevent inviting, dismissing, or removing companions already owned.
+CompanionRecruiter.MaxOwnedCompanions = 40
 
 # Normal temporary contract duration (3 hours).
 CompanionRecruiter.LifetimeMinutes = 180
@@ -25,12 +26,32 @@ CompanionRecruiter.LifetimeMinutes = 180
 # or cannot join within this many seconds after preparation. Clamped to 30-600.
 CompanionRecruiter.LoginTimeoutSeconds = 120
 
-# Fresh bot spell, skill, gear, and supply initialization is deliberately
-# paced on the world thread. Clamped to 1-5 companions per one-second update.
+# Spell, skill, gear, and supply preparation shares one world-thread budget
+# across temporary recruitment and permanent summons. Active companions do not
+# level up or regenerate their setup. Clamped to 1-5 per one-second update.
 CompanionRecruiter.PreparationsPerUpdate = 2
 
+# Equipment targets bot level + 5 below level 55. At level 55 and above, target
+# the owner's average equipped item level, with a minimum target of 55. Empty
+# slots, shirts, and tabards are excluded from the average. Target and ranges
+# are captured at purchase (temporary) or summon (permanent).
+# Prefer items within +/- this range; clamped to 0-100 item levels.
+CompanionRecruiter.GearItemLevelRange = 5
+
+# If a slot has no suitable item in the preferred range, widen to +/- this
+# range (clamped to the preferred range through 100). If that also fails, use
+# the closest suitable lower-level item; never exceed this range's upper cap
+# or AiPlayerbot.RandomGearMaxLevel. The target is not a minimum for each item.
+CompanionRecruiter.GearItemLevelFallbackRange = 15
+
+# Apply generated gear enchants only to equipped items above this item level.
+# The comparison is strict: the default enchants item level 66 and higher.
+# Set to 0 to retain PlayerBots' normal level-based enchanting behavior.
+CompanionRecruiter.EnchantItemLevelThreshold = 65
+
 # Once a contract expires, dead players and players in instances retain their
-# companions. This grace period begins (or is refreshed) while protected.
+# companions. Grace starts once at expiry, counts down outside protection,
+# and pauses while protected. Returning to protection never resets it.
 CompanionRecruiter.ProtectInInstances = 1
 CompanionRecruiter.ExpiryGraceMinutes = 10
 

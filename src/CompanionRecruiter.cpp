@@ -9,7 +9,9 @@
 #include "Group/Group.h"
 #include "Maps/Map.h"
 #include "ObjectAccessor.h"
+#include "ObjectMgr.h"
 #include "Objects/Creature.h"
+#include "Objects/Item.h"
 #include "Objects/Player.h"
 #include "PlayerbotAI.h"
 #include "PlayerbotAIConfig.h"
@@ -26,6 +28,7 @@
 #include <chrono>
 #include <climits>
 #include <cstdint>
+#include <ctime>
 #include <deque>
 #include <list>
 #include <map>
@@ -41,8 +44,12 @@ using Clock = std::chrono::steady_clock;
 
 constexpr uint32 RECRUITER_GOSSIP_TEXT = 919100;
 constexpr uint8 INVALID_SPEC_TAB = 255;
-constexpr uint32 MANAGE_PAGE_SIZE = 13;
-constexpr uint32 FILL_ASSIGNMENT_PAGE_SIZE = 25;
+// The Vanilla packet reader consumes at most 15 gossip options, even though
+// the server's GOSSIP_MAX_MENU_ITEMS allows 32. Extra options are interpreted
+// as quest data and corrupt the labels exposed to the addon.
+constexpr uint32 RECRUITER_MAX_OPTIONS = 15;
+constexpr uint32 MANAGE_PAGE_SIZE = (RECRUITER_MAX_OPTIONS - 4) / 2;
+constexpr uint32 FILL_ASSIGNMENT_PAGE_SIZE = RECRUITER_MAX_OPTIONS - 4;
 
 struct RecruiterSpec
 {
@@ -148,16 +155,24 @@ struct CompanionContract
     uint32 botGuid = 0;
     uint32 ownerGuid = 0;
     uint32 paidCost = 0;
+    EquipmentItemLevelTarget gearTarget;
     uint8 cls = 0;
     uint8 specTab = INVALID_SPEC_TAB;
     BotRoles role = BOT_ROLE_DPS;
     Clock::time_point createdAt;
+    Clock::time_point loginStartedAt{};
     Clock::time_point preparedAt{};
     Clock::time_point expiresAt;
     Clock::time_point graceExpiresAt{};
+    uint64 expiresAtUnix = 0;
+    uint64 graceExpiresAtUnix = 0;
+    uint64 persistedGraceExpiresAtUnix = 0;
+    uint64 gracePausedAtUnix = 0;
     bool prepared = false;
     bool initialized = false;
     bool joinedOnce = false;
+    bool loginRequested = false;
+    bool suspended = false;
     uint8 warningMask = 0;
 };
 
@@ -174,6 +189,10 @@ struct OwnedCompanion
     uint8 gender = GENDER_NONE;
     std::string name;
     bool invited = false;
+    bool prepared = false;
+    uint8 summonLevel = 0;
+    EquipmentItemLevelTarget gearTarget;
+    Clock::time_point inviteStartedAt{};
 };
 
 // Gossip, player, group, and world update hooks all execute on the world thread.
@@ -278,27 +297,38 @@ TalentSpec BuildRecruiterTreeSpec(uint8 cls, uint8 tab, uint32 points)
     while (spec.points < points)
     {
         bool addedPoint = false;
-        for (TalentSpec::TalentListEntry& talent : spec.talents)
+        // Some Vanilla trees contain fewer than 51 ranks. Fill the requested
+        // tree first, then spend the remainder without changing the main tree.
+        for (uint8 candidateTab : {tab, uint8((tab + 1) % 3), uint8((tab + 2) % 3)})
         {
-            if (talent.tabPage() != tab || talent.rank >= talent.maxRank)
+            if (candidateTab != tab &&
+                spec.GetTalentPoints(candidateTab) + 1 >= spec.GetTalentPoints(tab))
                 continue;
-            if (int(talent.talentInfo->Row * 5) > spec.GetTalentPoints(tab))
-                continue;
-
-            if (talent.talentInfo->DependsOn)
+            for (TalentSpec::TalentListEntry& talent : spec.talents)
             {
-                auto prerequisite = std::find_if(spec.talents.begin(), spec.talents.end(), [&talent](TalentSpec::TalentListEntry const& entry)
-                {
-                    return entry.talentInfo->TalentID == talent.talentInfo->DependsOn;
-                });
-                if (prerequisite == spec.talents.end() || prerequisite->rank < int(talent.talentInfo->DependsOnRank))
+                if (talent.tabPage() != candidateTab || talent.rank >= talent.maxRank)
                     continue;
-            }
+                if (int(talent.talentInfo->Row * 5) > spec.GetTalentPoints(candidateTab))
+                    continue;
 
-            ++talent.rank;
-            ++spec.points;
-            addedPoint = true;
-            break;
+                if (talent.talentInfo->DependsOn)
+                {
+                    auto prerequisite = std::find_if(spec.talents.begin(), spec.talents.end(), [&talent](TalentSpec::TalentListEntry const& entry)
+                    {
+                        return entry.talentInfo->TalentID == talent.talentInfo->DependsOn;
+                    });
+                    // DBC prerequisite ranks are zero-based; stored ranks are counts.
+                    if (prerequisite == spec.talents.end() || prerequisite->rank <= int(talent.talentInfo->DependsOnRank))
+                        continue;
+                }
+
+                ++talent.rank;
+                ++spec.points;
+                addedPoint = true;
+                break;
+            }
+            if (addedPoint)
+                break;
         }
 
         if (!addedPoint)
@@ -359,6 +389,28 @@ uint32 RecruiterSpecNo(uint8 cls, uint8 tab)
     return path ? uint32(path->id + 1) : 0;
 }
 
+void ReloadRecruiterSpecPaths()
+{
+    gRecruiterSpecPathsInitialized = false;
+    EnsureRecruiterSpecPaths();
+
+    // Config edits can change path IDs. Preserve each companion's chosen tree,
+    // including dismissed companions, before the next bot update or login.
+    auto refreshSpecNumbers = [](auto const& companions)
+    {
+        for (auto const& pair : companions)
+        {
+            auto const& companion = pair.second;
+            uint32 const specNo = companion.specTab == INVALID_SPEC_TAB ? 0 :
+                RecruiterSpecNo(companion.cls, companion.specTab);
+            if (specNo && sRandomPlayerbotMgr.GetValue(companion.botGuid, "specNo") != specNo)
+                sRandomPlayerbotMgr.SetValue(companion.botGuid, "specNo", specNo);
+        }
+    };
+    refreshSpecNumbers(gContracts);
+    refreshSpecNumbers(gOwnedCompanions);
+}
+
 std::string RecruiterSpecName(uint8 cls, uint8 tab)
 {
     RecruiterSpec const* spec = FindRecruiterSpec(cls, tab);
@@ -390,9 +442,49 @@ uint32 LoginTimeoutSeconds()
     return uint32(std::clamp<int32>(sConfig.GetIntDefault("CompanionRecruiter.LoginTimeoutSeconds", 120), 30, 600));
 }
 
+uint32 EnchantItemLevelThreshold()
+{
+    return uint32(std::clamp<int32>(
+        sConfig.GetIntDefault("CompanionRecruiter.EnchantItemLevelThreshold", 65), 0, 500));
+}
+
 uint32 PreparationsPerUpdate()
 {
     return uint32(std::clamp<int32>(sConfig.GetIntDefault("CompanionRecruiter.PreparationsPerUpdate", 2), 1, 5));
+}
+
+EquipmentItemLevelTarget CompanionGearTarget(Player const* owner, uint32 botLevel)
+{
+    EquipmentItemLevelTarget target;
+    target.range = uint32(std::clamp<int32>(sConfig.GetIntDefault("CompanionRecruiter.GearItemLevelRange", 5), 0, 100));
+    target.fallbackRange = std::max(target.range, uint32(std::clamp<int32>(
+        sConfig.GetIntDefault("CompanionRecruiter.GearItemLevelFallbackRange", 15), 0, 100)));
+    if (botLevel < 55)
+    {
+        target.average = botLevel + 5;
+        return target;
+    }
+    target.average = 55;
+    if (!owner)
+        return target;
+
+    uint64 totalItemLevel = 0;
+    uint32 count = 0;
+    for (uint8 slot = EQUIPMENT_SLOT_START; slot < EQUIPMENT_SLOT_END; ++slot)
+    {
+        if (slot == EQUIPMENT_SLOT_BODY || slot == EQUIPMENT_SLOT_TABARD)
+            continue;
+        Item const* item = owner->GetItemByPos(INVENTORY_SLOT_BAG_0, slot);
+        if (!item || !item->GetProto() || !item->GetProto()->ItemLevel)
+            continue;
+        totalItemLevel += item->GetProto()->ItemLevel;
+        ++count;
+    }
+    // Count equipped pieces only: empty low-level slots and a two-hander's
+    // unused off-hand must not drag the target below the gear actually worn.
+    if (count)
+        target.average = std::max<uint32>(55, uint32((totalItemLevel + count / 2) / count));
+    return target;
 }
 
 uint32 MaxCompanions()
@@ -484,7 +576,54 @@ void AddMenuItem(Player* player, uint8 icon, std::string const& text, uint32 act
 
 void SendMenu(Player* player, Creature* creature)
 {
+    if (player->PlayerTalkClass->GetGossipMenu().MenuItemCount() > RECRUITER_MAX_OPTIONS)
+    {
+        sLog.outError("Companion recruiter response exceeds the Vanilla client option limit.");
+        player->PlayerTalkClass->CloseGossip();
+        SendMessage(player, "The recruiter could not load this page. Please try again.");
+        return;
+    }
     player->PlayerTalkClass->SendGossipMenu(RECRUITER_GOSSIP_TEXT, creature->GetObjectGuid());
+}
+
+uint64 UnixNow()
+{
+    return uint64(std::time(nullptr));
+}
+
+Clock::time_point RestoreDeadline(uint64 unixDeadline)
+{
+    uint64 const nowUnix = UnixNow();
+    Clock::time_point const now = Clock::now();
+    if (unixDeadline <= nowUnix)
+        return now;
+    return now + std::chrono::seconds(unixDeadline - nowUnix);
+}
+
+void PersistTemporaryContract(CompanionContract const& contract)
+{
+    CharacterDatabase.PExecute(
+        "REPLACE INTO companion_recruiter_contract "
+        "(bot_guid, owner_guid, paid_cost, class_id, role, spec_tab, gear_average, gear_range, "
+        "gear_fallback_range, expires_at, grace_expires_at, prepared, joined_once, warning_mask) "
+        "VALUES ('%u', '%u', '%u', '%u', '%u', '%u', '%u', '%u', '%u', '" UI64FMTD
+        "', '" UI64FMTD "', '%u', '%u', '%u')",
+        contract.botGuid, contract.ownerGuid, contract.paidCost, uint32(contract.cls), uint32(contract.role),
+        uint32(contract.specTab), contract.gearTarget.average, contract.gearTarget.range,
+        contract.gearTarget.fallbackRange, contract.expiresAtUnix, contract.graceExpiresAtUnix,
+        contract.prepared ? 1u : 0u, contract.joinedOnce ? 1u : 0u, uint32(contract.warningMask));
+}
+
+void RefreshTemporaryMarker(CompanionContract const& contract)
+{
+    uint64 const effectiveDeadline = std::max(contract.expiresAtUnix, contract.graceExpiresAtUnix);
+    uint64 const nowUnix = UnixNow();
+    uint64 const remaining = std::max<uint64>(
+        effectiveDeadline > nowUnix ? effectiveDeadline - nowUnix : 1u,
+        uint64(LoginTimeoutSeconds()) + 60u);
+    int32 const duration = int32(std::min<uint64>(remaining, uint64(INT_MAX)));
+    sRandomPlayerbotMgr.SetValue(
+        contract.botGuid, "companion_recruiter", contract.ownerGuid, "", duration);
 }
 
 uint32 CountOwnerContracts(uint32 ownerGuid)
@@ -495,19 +634,26 @@ uint32 CountOwnerContracts(uint32 ownerGuid)
     }));
 }
 
-void TrackCompanion(uint32 botGuid, uint32 ownerGuid, BotRoles role, uint8 cls, uint8 specTab, uint32 paidCost)
+void TrackCompanion(uint32 botGuid, uint32 ownerGuid, BotRoles role, uint8 cls, uint8 specTab, uint32 paidCost,
+    uint32 botLevel)
 {
     CompanionContract contract;
     contract.botGuid = botGuid;
     contract.ownerGuid = ownerGuid;
     contract.paidCost = paidCost;
+    contract.gearTarget = CompanionGearTarget(
+        ObjectAccessor::FindConnectedPlayer(ObjectGuid(HIGHGUID_PLAYER, ownerGuid)), botLevel);
     contract.cls = cls;
     contract.specTab = specTab;
     contract.role = role;
     contract.createdAt = Clock::now();
+    contract.loginStartedAt = contract.createdAt;
     contract.expiresAt = contract.createdAt + std::chrono::seconds(LifetimeSeconds());
+    contract.expiresAtUnix = UnixNow() + LifetimeSeconds();
+    contract.loginRequested = true;
 
     gContracts[botGuid] = contract;
+    PersistTemporaryContract(gContracts[botGuid]);
 }
 
 void RequestDismiss(uint32 botGuid)
@@ -517,7 +663,12 @@ void RequestDismiss(uint32 botGuid)
 
     auto itr = gContracts.find(botGuid);
     if (itr != gContracts.end())
+    {
         itr->second.expiresAt = Clock::time_point::min();
+        itr->second.expiresAtUnix = 0;
+        itr->second.graceExpiresAtUnix = 0;
+        PersistTemporaryContract(itr->second);
+    }
 }
 
 void RequestDismissOwner(uint32 ownerGuid)
@@ -527,7 +678,29 @@ void RequestDismissOwner(uint32 ownerGuid)
 
     for (auto& pair : gContracts)
         if (pair.second.ownerGuid == ownerGuid)
+        {
             pair.second.expiresAt = Clock::time_point::min();
+            pair.second.expiresAtUnix = 0;
+            pair.second.graceExpiresAtUnix = 0;
+            PersistTemporaryContract(pair.second);
+        }
+}
+
+void RequestDismissOwnerFromGroup(uint32 ownerGuid)
+{
+    if (!ownerGuid)
+        return;
+
+    for (auto& pair : gContracts)
+    {
+        CompanionContract& contract = pair.second;
+        if (contract.ownerGuid != ownerGuid || contract.suspended)
+            continue;
+        contract.expiresAt = Clock::time_point::min();
+        contract.expiresAtUnix = 0;
+        contract.graceExpiresAtUnix = 0;
+        PersistTemporaryContract(contract);
+    }
 }
 
 void DeleteCompanion(uint32 botGuid)
@@ -540,6 +713,8 @@ void DeleteCompanion(uint32 botGuid)
     sRandomPlayerbotMgr.SetValue(botGuid, "create group", 0);
     sRandomPlayerbotMgr.SetValue(botGuid, "companion_recruiter", 0);
     sRandomPlayerbotMgr.SetExternallyManaged(botGuid, false);
+    CharacterDatabase.PExecute(
+        "DELETE FROM companion_recruiter_contract WHERE bot_guid = '%u'", botGuid);
     sRandomPlayerbotMgr.DeleteBot(ObjectGuid(HIGHGUID_PLAYER, botGuid));
     CharacterDatabase.PExecute(
         "DELETE FROM ai_playerbot_random_bots WHERE owner = 0 AND bot = '%u'",
@@ -566,7 +741,7 @@ bool IsPendingForRecruitingGroup(CompanionContract const& contract, Player* recr
 
     Player* bot = sRandomPlayerbotMgr.GetPlayerBot(contract.botGuid);
     Group* group = recruiter->GetGroup();
-    return !bot || bot->GetGroup() != group;
+    return !bot || !group || bot->GetGroup() != group;
 }
 
 uint32 CountPendingGroupContracts(Player* recruiter)
@@ -1042,7 +1217,7 @@ bool CreateCompanion(Player* owner, BotRoles role, uint8 forcedClass = 0, bool p
     else
     {
         sRandomPlayerbotMgr.SetValue(botGuidLow, "companion_recruiter", ownerGuid, "", int32(LifetimeSeconds()));
-        TrackCompanion(botGuidLow, ownerGuid, role, cls, specTab, cost);
+        TrackCompanion(botGuidLow, ownerGuid, role, cls, specTab, cost, owner->GetLevel());
     }
     if (specTab != INVALID_SPEC_TAB)
         sRandomPlayerbotMgr.SetValue(botGuidLow, "specNo", RecruiterSpecNo(cls, specTab));
@@ -1355,6 +1530,79 @@ void LoadOwnedCompanions()
             sRandomPlayerbotMgr.SetValue(pair.first, "companion_recruiter_owned", pair.second.ownerGuid, "", INT32_MAX);
 }
 
+void LoadTemporaryContracts()
+{
+    gContracts.clear();
+    QueryResult* result = CharacterDatabase.Query(
+        "SELECT bot_guid, owner_guid, paid_cost, class_id, role, spec_tab, gear_average, gear_range, "
+        "gear_fallback_range, expires_at, grace_expires_at, prepared, joined_once, warning_mask "
+        "FROM companion_recruiter_contract");
+    if (!result)
+        return;
+
+    uint64 const nowUnix = UnixNow();
+    std::vector<uint32> staleBots;
+    do
+    {
+        Field* fields = result->Fetch();
+        CompanionContract contract;
+        contract.botGuid = fields[0].GetUInt32();
+        contract.ownerGuid = fields[1].GetUInt32();
+        contract.paidCost = fields[2].GetUInt32();
+        contract.cls = uint8(fields[3].GetUInt32());
+        contract.role = BotRoles(fields[4].GetUInt32());
+        contract.specTab = uint8(fields[5].GetUInt32());
+        contract.gearTarget.average = fields[6].GetUInt32();
+        contract.gearTarget.range = fields[7].GetUInt32();
+        contract.gearTarget.fallbackRange = fields[8].GetUInt32();
+        contract.expiresAtUnix = fields[9].GetUInt64();
+        contract.graceExpiresAtUnix = fields[10].GetUInt64();
+        contract.prepared = fields[11].GetBool();
+        contract.joinedOnce = fields[12].GetBool();
+        contract.warningMask = uint8(fields[13].GetUInt32());
+
+        if (!contract.botGuid || !contract.ownerGuid || !contract.expiresAtUnix)
+        {
+            staleBots.push_back(contract.botGuid);
+            continue;
+        }
+
+        bool startedGrace = false;
+        if (contract.expiresAtUnix <= nowUnix && !contract.graceExpiresAtUnix)
+        {
+            contract.graceExpiresAtUnix = nowUnix + GraceSeconds();
+            startedGrace = true;
+        }
+        if (std::max(contract.expiresAtUnix, contract.graceExpiresAtUnix) <= nowUnix)
+        {
+            staleBots.push_back(contract.botGuid);
+            continue;
+        }
+
+        contract.createdAt = Clock::now();
+        contract.expiresAt = RestoreDeadline(contract.expiresAtUnix);
+        if (contract.graceExpiresAtUnix)
+            contract.graceExpiresAt = RestoreDeadline(contract.graceExpiresAtUnix);
+        if (contract.prepared)
+            contract.preparedAt = Clock::now();
+        contract.persistedGraceExpiresAtUnix = contract.graceExpiresAtUnix;
+        contract.suspended = true;
+        gContracts[contract.botGuid] = contract;
+
+        sRandomPlayerbotMgr.SetExternallyManaged(contract.botGuid, true);
+        if (contract.specTab != INVALID_SPEC_TAB)
+            sRandomPlayerbotMgr.SetValue(
+                contract.botGuid, "specNo", RecruiterSpecNo(contract.cls, contract.specTab));
+        RefreshTemporaryMarker(contract);
+        if (startedGrace)
+            PersistTemporaryContract(contract);
+    } while (result->NextRow());
+    delete result;
+
+    for (uint32 botGuid : staleBots)
+        DeleteCompanion(botGuid);
+}
+
 char const* RecruiterClassName(uint8 cls)
 {
     switch (cls)
@@ -1457,8 +1705,8 @@ void SendPermanentClassMenu(Player* player, Creature* creature)
     session.race = 0;
     player->PlayerTalkClass->ClearMenus();
     AddPermanentClassOptions(player);
-    AddSpecOptions(player, defaultClass, true);
-    AddPermanentRaceOptions(player, defaultClass);
+    // Send the class catalogue separately. The addon caches it and requests
+    // the selected class's details without leaving its recruitment page.
     AddMenuItem(player, GOSSIP_ICON_MONEY_BAG, "Recruit permanent companion", ACTION_PERMANENT_RECRUIT);
     AddMenuItem(player, GOSSIP_ICON_CHAT, "Back to recruiter", ACTION_RETURN_MAIN);
     SendMenu(player, creature);
@@ -1475,7 +1723,6 @@ void SendPermanentSpecMenu(Player* player, Creature* creature, uint8 cls)
         session.race = 0;
     }
     player->PlayerTalkClass->ClearMenus();
-    AddPermanentClassOptions(player);
     AddSpecOptions(player, cls, true);
     AddPermanentRaceOptions(player, cls);
     AddMenuItem(player, GOSSIP_ICON_MONEY_BAG, "Recruit permanent companion", ACTION_PERMANENT_RECRUIT);
@@ -1527,6 +1774,7 @@ void SendManageMenu(Player* player, Creature* creature)
             AddMenuItem(player, GOSSIP_ICON_CHAT, "More companions", ACTION_MANAGE_NEXT);
     }
     AddMenuItem(player, GOSSIP_ICON_CHAT, "Buy another companion", ACTION_PERMANENT_MENU);
+    AddMenuItem(player, GOSSIP_ICON_CHAT, "Back to recruiter", ACTION_RETURN_MAIN);
     SendMenu(player, creature);
 }
 
@@ -1553,23 +1801,168 @@ bool IsSafeTeleportTarget(Player const* player)
         !player->IsFlying() && !player->HasFlag(PLAYER_FLAGS, PLAYER_FLAGS_GHOST);
 }
 
+void NotifyOwnerCannotLeadGroup(Player* owner)
+{
+    static std::map<uint32, Clock::time_point> lastTold;
+    if (!owner)
+        return;
+
+    Clock::time_point const now = Clock::now();
+    Clock::time_point& when = lastTold[owner->GetGUIDLow()];
+    if (when != Clock::time_point{} && now < when + std::chrono::seconds(30))
+        return;
+    when = now;
+    SendMessage(owner, "You are not the party leader, so companions cannot join this group.");
+}
+
+// Direct membership avoids repeatedly sending failed invite opcodes.
+// Companions do not change leadership chosen by the group's players.
+bool EnsureCompanionInGroup(Player* owner, Player* bot)
+{
+    if (!owner || !bot || owner == bot)
+        return false;
+
+    Group* group = owner->GetGroup();
+    if (group && group->isBGGroup())
+        group = owner->GetOriginalGroup();
+    if (owner->IsInGroup(bot, true))
+        return true;
+    if (owner->HandleHardcoreInteraction(bot, true) != Player::HardcoreInteractionResult::Allowed)
+        return false;
+
+    if (group)
+    {
+        ObjectGuid const ownerGuid = owner->GetObjectGuid();
+        if (!group->IsLeader(ownerGuid) && !group->IsAssistant(ownerGuid))
+        {
+            NotifyOwnerCannotLeadGroup(owner);
+            return false;
+        }
+
+        uint32 const capacity = group->isRaidGroup() ? MAX_RAID_SIZE : MAX_GROUP_SIZE;
+        if (group->GetMembersCount() >= capacity)
+            return false;
+        if (!group->HandleHardcoreInteraction(bot))
+            return false;
+    }
+
+    if (Group* botGroup = bot->GetGroup())
+    {
+        if (botGroup != group)
+            bot->RemoveFromGroup();
+    }
+    if (Group* pending = bot->GetGroupInvite())
+        pending->RemoveInvite(bot);
+
+    if (!group)
+    {
+        if (Group* pending = owner->GetGroupInvite())
+            pending->RemoveInvite(owner);
+
+        group = new Group;
+        if (!group->Create(owner->GetObjectGuid(), owner->GetName()))
+        {
+            delete group;
+            return false;
+        }
+        sObjectMgr.AddGroup(group);
+    }
+
+    return group->AddMember(bot->GetObjectGuid(), bot->GetName());
+}
+
+bool CompanionIsWithOwner(Player* owner, Player* bot)
+{
+    if (!owner || !bot || !owner->IsInWorld() || !bot->IsInWorld())
+        return false;
+    if (owner->GetMapId() != bot->GetMapId() || owner->GetInstanceId() != bot->GetInstanceId())
+        return false;
+    return bot->GetDistance(owner) <= 160.0f;
+}
+
+// TeleportTo on the same map id is a near teleport and stays in the bot's
+// current instance. Matching the map id is not enough: the bot has to land in
+// the owner's instance, or it stands in a private copy the owner cannot see.
+void LogCompanionTravelBlocked(Player* owner, Player* bot, char const* reason)
+{
+    static std::map<uint32, Clock::time_point> lastLogged;
+    Clock::time_point const now = Clock::now();
+    Clock::time_point& when = lastLogged[bot->GetGUIDLow()];
+    if (when != Clock::time_point{} && now < when + std::chrono::seconds(30))
+        return;
+    when = now;
+
+    Group* group = owner->GetGroup();
+    sLog.outError("Companion travel blocked: reason=%s owner=%s guid=%u group=%u leader=%u "
+        "ownerMap=%u ownerInstance=%u bot=%s guid=%u botGroup=%u botMap=%u botInstance=%u alive=%u",
+        reason, owner->GetName(), owner->GetGUIDLow(), group ? group->GetId() : 0u,
+        group ? group->GetLeaderGuid().GetCounter() : 0u, owner->GetMapId(), owner->GetInstanceId(),
+        bot->GetName(), bot->GetGUIDLow(), bot->GetGroup() ? bot->GetGroup()->GetId() : 0u,
+        bot->GetMapId(), bot->GetInstanceId(), bot->IsAlive() ? 1u : 0u);
+}
+
+void BringCompanionToOwner(Player* owner, Player* bot)
+{
+    // Dungeon entry resurrects ghosts in the core. Do not let following bypass
+    // the recovery timer by teleporting a dead companion back to its corpse.
+    if (!IsSafeTeleportTarget(owner) || !bot || !bot->IsAlive() ||
+        bot->IsBeingTeleported() || bot->IsTaxiFlying() || bot->IsFlying())
+        return;
+    if (!owner->IsInGroup(bot, true) || CompanionIsWithOwner(owner, bot))
+        return;
+
+    Group* group = owner->GetGroup();
+    Map* ownerMap = owner->GetMap();
+    uint32 options = TELE_TO_NOT_LEAVE_COMBAT | TELE_TO_NOT_UNSUMMON_PET;
+    if (ownerMap && ownerMap->IsDungeon())
+    {
+        DungeonMap* dungeon = static_cast<DungeonMap*>(ownerMap);
+        DungeonPersistentState* state = dungeon->GetPersistanceState();
+        if (!state || !group)
+        {
+            LogCompanionTravelBlocked(owner, bot, "missing owner instance state or group");
+            return;
+        }
+
+        InstanceGroupBind* bind = group->GetBoundInstance(ownerMap->GetId());
+        if (!bind)
+            bind = group->BindToInstance(state, false);
+        if (!bind || bind->state != state)
+        {
+            LogCompanionTravelBlocked(owner, bot, "group bound to a different instance");
+            return;
+        }
+
+        InstancePlayerBind* selfBind = bot->GetBoundInstance(ownerMap->GetId());
+        if (selfBind && selfBind->perm && selfBind->state != state)
+        {
+            LogCompanionTravelBlocked(owner, bot, "companion permanently bound to a different instance");
+            return;
+        }
+    }
+
+    if (bot->IsInWorld() && bot->GetMapId() == owner->GetMapId() && bot->GetInstanceId() != owner->GetInstanceId())
+        options |= TELE_TO_FORCE_MAP_CHANGE;
+
+    if (!bot->TeleportTo(owner->GetMapId(), owner->GetPositionX(), owner->GetPositionY(),
+        owner->GetPositionZ(), owner->GetOrientation(), options))
+        LogCompanionTravelBlocked(owner, bot, "core rejected teleport");
+}
+
 bool ApplyRecruiterSpec(uint32 botGuid, Player* bot, PlayerbotAI* ai, uint8 cls, uint8 specTab,
-    BotRoles role, PlayerbotFactory& factory)
+    BotRoles role)
 {
     uint32 const specNo = RecruiterSpecNo(cls, specTab);
     if (!specNo)
         return false;
 
-    sRandomPlayerbotMgr.SetValue(botGuid, "specNo", specNo);
+    if (sRandomPlayerbotMgr.GetValue(botGuid, "specNo") != specNo)
+        sRandomPlayerbotMgr.SetValue(botGuid, "specNo", specNo);
     if (bot->GetLevel() < 10)
         return false;
 
     ai->SetForcedRole(uint8(role));
     ai->DoSpecificAction("auto talents");
-    factory.EquipGear();
-    if (bot->GetLevel() >= sPlayerbotAIConfig.minEnchantingBotLevel)
-        factory.EnchantEquipment();
-    factory.InitAmmo();
     ai->ResetStrategies();
     TalentSpec appliedSpec(bot);
     return appliedSpec.GetTalentPoints() > 0 && appliedSpec.highestTree() == specTab;
@@ -1577,24 +1970,28 @@ bool ApplyRecruiterSpec(uint32 botGuid, Player* bot, PlayerbotAI* ai, uint8 cls,
 
 bool PrepareOnlineCompanion(CompanionContract& contract, Player* bot, PlayerbotAI* ai)
 {
+    bot->SetXPGain(false);
     ai->SetForcedRole(uint8(contract.role));
     if (contract.specTab == INVALID_SPEC_TAB && bot->GetLevel() >= 10 &&
         !(AiFactory::GetPlayerRoles(bot) & contract.role))
         return false;
 
-    PlayerbotFactory factory(bot, bot->GetLevel());
-    factory.InitializeAtCurrentLevel();
-    if (contract.specTab != INVALID_SPEC_TAB)
+    if (contract.specTab != INVALID_SPEC_TAB && bot->GetLevel() >= 10)
     {
-        if (!ApplyRecruiterSpec(contract.botGuid, bot, ai, contract.cls, contract.specTab, contract.role, factory))
+        if (!ApplyRecruiterSpec(contract.botGuid, bot, ai, contract.cls, contract.specTab, contract.role))
             return false;
     }
+
+    PlayerbotFactory factory(bot, bot->GetLevel());
+    factory.InitializeAtCurrentLevel(contract.gearTarget, EnchantItemLevelThreshold());
+    factory.EnchantEquipment();
 
     sRandomPlayerbotMgr.SetValue(contract.botGuid, "create levelup", 0);
     sRandomPlayerbotMgr.SetValue(contract.botGuid, "create gear", 0);
     sRandomPlayerbotMgr.SetValue(contract.botGuid, "create group", 0);
     contract.preparedAt = Clock::now();
     contract.prepared = true;
+    PersistTemporaryContract(contract);
     return true;
 }
 
@@ -1603,6 +2000,9 @@ bool InitializeOnlineCompanion(CompanionContract& contract, Player* owner, Playe
     PlayerbotAI* ai = GetBotAI(bot);
     if (!ai || !owner)
         return true;
+
+    bot->SetXPGain(false);
+    ai->SetForcedRole(uint8(contract.role));
 
     if (!contract.prepared)
     {
@@ -1618,17 +2018,14 @@ bool InitializeOnlineCompanion(CompanionContract& contract, Player* owner, Playe
         ai->ChangeStrategy("+follow", BotState::BOT_STATE_NON_COMBAT);
     }
 
-    if (!owner->IsInGroup(bot, true))
-        ai->DoSpecificAction("join", ai::Event("companion recruiter", "", owner), true);
+    EnsureCompanionInGroup(owner, bot);
+    BringCompanionToOwner(commandMaster, bot);
 
-    if (IsSafeTeleportTarget(commandMaster) && !bot->IsBeingTeleported() && !bot->IsTaxiFlying() && !bot->IsFlying() &&
-        (bot->GetMapId() != commandMaster->GetMapId() || bot->GetDistance(commandMaster) > 160.0f))
-        bot->TeleportTo(commandMaster->GetMapId(), commandMaster->GetPositionX(), commandMaster->GetPositionY(),
-            commandMaster->GetPositionZ(), commandMaster->GetOrientation(),
-            TELE_TO_NOT_LEAVE_COMBAT | TELE_TO_NOT_UNSUMMON_PET);
-
+    bool const wasJoined = contract.joinedOnce;
     contract.initialized = owner->IsInGroup(bot, true);
     contract.joinedOnce = contract.joinedOnce || contract.initialized;
+    if (contract.joinedOnce != wasJoined)
+        PersistTemporaryContract(contract);
     return true;
 }
 
@@ -1645,52 +2042,29 @@ bool InitializeOwnedCompanion(OwnedCompanion& companion, Player* owner, Player* 
         ai->ChangeStrategy("+follow", BotState::BOT_STATE_NON_COMBAT);
     }
 
-    bool const levelCatchup = bot->GetLevel() < owner->GetLevel();
-    if (levelCatchup)
+    if (!companion.prepared)
     {
-        bot->GiveLevel(owner->GetLevel());
+        // The invite captures the requested level before login/preparation is
+        // queued. Once prepared, owner level-ups never change an active summon.
+        bot->SetXPGain(false);
+        if (bot->GetLevel() < companion.summonLevel)
+            bot->GiveLevel(companion.summonLevel);
         companion.level = uint8(bot->GetLevel());
-    }
 
-    bool const needsInitialization = levelCatchup || sRandomPlayerbotMgr.GetValue(companion.botGuid, "create levelup") ||
-        sRandomPlayerbotMgr.GetValue(companion.botGuid, "create gear");
-    if (needsInitialization)
-    {
-        // PlayerBots' master-sync equipment path caps item levels near the
-        // owner's equipped gear score. At low levels, its normal level-based selection
-        // is more reliable when the owner's equipment is sparse.
-        uint32 const ownerGearScore = ai->GetEquipGearScore(owner, false, false);
-        // GetEquipGearScore averages empty equipment slots as zero. Do not use
-        // a sparse owner's low nonzero score as the item-level cap: InitEquipment
-        // clears the bot's gear before selecting replacements, and a cap below
-        // the bot's level can leave it with no usable replacements.
-        bool const syncGearWithMaster = owner->GetLevel() >= 55 && ownerGearScore != 0 &&
-            ownerGearScore + sPlayerbotAIConfig.randomGearMaxDiff >= owner->GetLevel();
+        // Apply talents before generating equipment so it is rolled once for
+        // the requested specialization and the gear target captured at summon.
+        if (companion.specTab != INVALID_SPEC_TAB && bot->GetLevel() >= 10 &&
+            !ApplyRecruiterSpec(companion.botGuid, bot, ai, companion.cls, companion.specTab, companion.role))
+            return false;
+
         PlayerbotFactory factory(bot, bot->GetLevel());
-        factory.InitializeAtCurrentLevel(syncGearWithMaster);
+        factory.InitializeAtCurrentLevel(companion.gearTarget, EnchantItemLevelThreshold());
+        factory.EnchantEquipment();
         sRandomPlayerbotMgr.SetValue(companion.botGuid, "create levelup", 0);
         sRandomPlayerbotMgr.SetValue(companion.botGuid, "create gear", 0);
         sRandomPlayerbotMgr.SetValue(companion.botGuid, "create group", 0);
         ai->ResetStrategies();
-    }
-
-    if (companion.specTab != INVALID_SPEC_TAB)
-    {
-        uint32 const specNo = RecruiterSpecNo(companion.cls, companion.specTab);
-        if (specNo)
-        {
-            uint32 const savedSpecNo = sRandomPlayerbotMgr.GetValue(companion.botGuid, "specNo");
-            TalentSpec currentSpec(bot);
-            bool const hasUnspentPoints = currentSpec.GetTalentPoints() < bot->CalculateTalentsPoints();
-            if (needsInitialization || savedSpecNo != specNo || (bot->GetLevel() >= 10 &&
-                (AiFactory::GetPlayerSpecTab(bot) != companion.specTab || hasUnspentPoints)))
-            {
-                PlayerbotFactory factory(bot, bot->GetLevel());
-                ApplyRecruiterSpec(companion.botGuid, bot, ai, companion.cls, companion.specTab, companion.role, factory);
-            }
-            else
-                sRandomPlayerbotMgr.SetValue(companion.botGuid, "specNo", specNo);
-        }
+        companion.prepared = true;
     }
 
     if (!companion.invited)
@@ -1703,27 +2077,27 @@ bool InitializeOwnedCompanion(OwnedCompanion& companion, Player* owner, Player* 
         ai->ChangeStrategy("+follow", BotState::BOT_STATE_NON_COMBAT);
     }
 
-    if (!owner->IsInGroup(bot, true))
-        ai->DoSpecificAction("join", ai::Event("companion recruiter owned", "", owner), true);
-
-    if (IsSafeTeleportTarget(commandMaster) && !bot->IsBeingTeleported() && !bot->IsTaxiFlying() && !bot->IsFlying() &&
-        (bot->GetMapId() != commandMaster->GetMapId() || bot->GetDistance(commandMaster) > 160.0f))
-        bot->TeleportTo(commandMaster->GetMapId(), commandMaster->GetPositionX(), commandMaster->GetPositionY(),
-            commandMaster->GetPositionZ(), commandMaster->GetOrientation(),
-            TELE_TO_NOT_LEAVE_COMBAT | TELE_TO_NOT_UNSUMMON_PET);
+    EnsureCompanionInGroup(owner, bot);
+    BringCompanionToOwner(commandMaster, bot);
     return true;
 }
 
 void EnsureOwnedCompanionOnline(OwnedCompanion& companion)
 {
     sRandomPlayerbotMgr.SetExternallyManaged(companion.botGuid, true);
-    if (!sRandomPlayerbotMgr.GetPlayerBot(companion.botGuid))
+    if (!sRandomPlayerbotMgr.GetPlayerBot(companion.botGuid) &&
+        !sRandomPlayerbotMgr.HasPendingBotLogin(companion.botGuid))
         sRandomPlayerbotMgr.AddPlayerBot(companion.botGuid, 0);
 }
 
 void DismissOwnedCompanion(OwnedCompanion& companion)
 {
     companion.invited = false;
+    companion.prepared = false;
+    companion.summonLevel = 0;
+    companion.gearTarget = {};
+    companion.inviteStartedAt = {};
+    sRandomPlayerbotMgr.CancelPendingBotLogin(companion.botGuid);
     if (Player* bot = sRandomPlayerbotMgr.GetPlayerBot(companion.botGuid))
     {
         if (bot->GetGroup())
@@ -1732,8 +2106,9 @@ void DismissOwnedCompanion(OwnedCompanion& companion)
     }
 }
 
-void UpdateOwnedCompanions()
+void UpdateOwnedCompanions(uint32& preparationBudget)
 {
+    Clock::time_point const now = Clock::now();
     for (auto& pair : gOwnedCompanions)
     {
         OwnedCompanion& companion = pair.second;
@@ -1747,6 +2122,20 @@ void UpdateOwnedCompanions()
         }
         if (companion.invited)
         {
+            bool const following = bot && owner->IsInGroup(bot, true);
+            if (following)
+                companion.inviteStartedAt = {};
+            else if (companion.inviteStartedAt == Clock::time_point{})
+                companion.inviteStartedAt = now;
+
+            if (!following && now >= companion.inviteStartedAt + std::chrono::seconds(LoginTimeoutSeconds()))
+            {
+                DismissOwnedCompanion(companion);
+                SendMessage(owner, companion.name +
+                    " could not log in and join in time; the invitation was cancelled. It remains in your roster.");
+                continue;
+            }
+
             Group* group = owner->GetGroup();
             if (group && (!bot || bot->GetGroup() != group))
             {
@@ -1763,8 +2152,22 @@ void UpdateOwnedCompanions()
 
             EnsureOwnedCompanionOnline(companion);
             bot = sRandomPlayerbotMgr.GetPlayerBot(companion.botGuid);
-            if (bot)
-                InitializeOwnedCompanion(companion, owner, bot);
+            if (bot && GetBotAI(bot))
+            {
+                if (!companion.prepared)
+                {
+                    if (!preparationBudget)
+                        continue;
+                    --preparationBudget;
+                }
+                if (!InitializeOwnedCompanion(companion, owner, bot))
+                {
+                    DismissOwnedCompanion(companion);
+                    SendMessage(owner, companion.name + " could not be prepared; the invitation was cancelled. It remains in your roster.");
+                }
+                else if (owner->IsInGroup(bot, true))
+                    companion.inviteStartedAt = {};
+            }
         }
         else if (bot)
             DismissOwnedCompanion(companion);
@@ -1789,6 +2192,11 @@ bool ToggleOwnedCompanion(Player* owner, uint32 index)
     if (!CanInviteCompanion(owner))
         return false;
     companion.invited = true;
+    companion.prepared = false;
+    companion.summonLevel = uint8(owner->GetLevel());
+    companion.gearTarget = CompanionGearTarget(owner,
+        std::max<uint32>(companion.summonLevel, bot ? bot->GetLevel() : companion.level));
+    companion.inviteStartedAt = Clock::now();
     EnsureOwnedCompanionOnline(companion);
     SendMessage(owner, companion.name + " is being invited to your group.");
     return true;
@@ -1818,96 +2226,207 @@ bool RemoveOwnedCompanion(Player* owner, uint32 index)
     return true;
 }
 
-void UpdateContracts()
+void SuspendTemporaryCompanion(CompanionContract& contract)
+{
+    contract.suspended = true;
+    contract.initialized = false;
+    contract.loginRequested = false;
+    sRandomPlayerbotMgr.CancelPendingBotLogin(contract.botGuid);
+    if (Player* bot = sRandomPlayerbotMgr.GetPlayerBot(contract.botGuid))
+    {
+        if (bot->GetGroup())
+            bot->GetGroup()->RemoveMember(bot->GetObjectGuid(), GROUP_LEAVE);
+        sRandomPlayerbotMgr.LogoutPlayerBot(contract.botGuid, true);
+    }
+}
+
+void SuspendOwnerContracts(uint32 ownerGuid)
+{
+    for (auto& pair : gContracts)
+        if (pair.second.ownerGuid == ownerGuid)
+            SuspendTemporaryCompanion(pair.second);
+}
+
+bool UpdateContractGrace(CompanionContract& contract, uint64 nowUnix, bool protectedOwner)
+{
+    bool const started = !contract.graceExpiresAtUnix;
+    bool const wasPaused = contract.gracePausedAtUnix != 0;
+    if (started)
+        contract.graceExpiresAtUnix = nowUnix + GraceSeconds();
+
+    // Move the deadline only by time actually spent paused, preserving the
+    // remaining allowance across repeated visits to protected areas.
+    if (wasPaused && nowUnix > contract.gracePausedAtUnix)
+        contract.graceExpiresAtUnix += nowUnix - contract.gracePausedAtUnix;
+    contract.gracePausedAtUnix = protectedOwner ? nowUnix : 0;
+    contract.graceExpiresAt = RestoreDeadline(contract.graceExpiresAtUnix);
+
+    if (started || wasPaused != protectedOwner ||
+        contract.graceExpiresAtUnix > contract.persistedGraceExpiresAtUnix + 60u)
+    {
+        contract.persistedGraceExpiresAtUnix = contract.graceExpiresAtUnix;
+        return true;
+    }
+    return false;
+}
+
+void UpdateContracts(uint32& preparationBudget)
 {
     Clock::time_point const now = Clock::now();
+    uint64 const nowUnix = UnixNow();
     std::vector<uint32> deletes;
     std::vector<std::pair<Player*, std::string>> messages;
-    uint32 preparationBudget = PreparationsPerUpdate();
 
     for (auto& pair : gContracts)
     {
         CompanionContract& contract = pair.second;
-            Player* owner = ObjectAccessor::FindConnectedPlayer(ObjectGuid(HIGHGUID_PLAYER, contract.ownerGuid));
-            if (!owner)
+        if (contract.expiresAt == Clock::time_point::min() || !contract.expiresAtUnix)
+        {
+            deletes.push_back(contract.botGuid);
+            continue;
+        }
+
+        Player* owner = ObjectAccessor::FindConnectedPlayer(ObjectGuid(HIGHGUID_PLAYER, contract.ownerGuid));
+
+        if (owner && contract.expiresAtUnix > nowUnix)
+        {
+            uint64 const remaining = contract.expiresAtUnix - nowUnix;
+            uint32 warningMinutes = 0;
+            if (remaining <= 60 && !(contract.warningMask & 4))
+            {
+                contract.warningMask |= 7;
+                warningMinutes = 1;
+            }
+            else if (remaining <= 300 && !(contract.warningMask & 2))
+            {
+                contract.warningMask |= 3;
+                warningMinutes = 5;
+            }
+            else if (remaining <= 600 && !(contract.warningMask & 1))
+            {
+                contract.warningMask |= 1;
+                warningMinutes = 10;
+            }
+            if (warningMinutes)
+            {
+                PersistTemporaryContract(contract);
+                messages.emplace_back(owner, "Your temporary companion contract expires in " +
+                    std::to_string(warningMinutes) + (warningMinutes == 1 ? " minute." : " minutes."));
+            }
+        }
+        if (contract.expiresAtUnix <= nowUnix)
+        {
+            bool const protectedOwner = owner && IsProtected(owner);
+            if (UpdateContractGrace(contract, nowUnix, protectedOwner))
+            {
+                PersistTemporaryContract(contract);
+                RefreshTemporaryMarker(contract);
+            }
+            if (!protectedOwner && contract.graceExpiresAtUnix <= nowUnix)
             {
                 deletes.push_back(contract.botGuid);
                 continue;
             }
+        }
 
-            if (contract.expiresAt == Clock::time_point::min())
+        if (!owner)
+        {
+            if (!contract.suspended || sRandomPlayerbotMgr.GetPlayerBot(contract.botGuid) ||
+                sRandomPlayerbotMgr.HasPendingBotLogin(contract.botGuid))
+                SuspendTemporaryCompanion(contract);
+            continue;
+        }
+
+        bool const wasSuspended = contract.suspended;
+        contract.suspended = false;
+        if (wasSuspended && contract.prepared && !contract.joinedOnce)
+            contract.preparedAt = now;
+        Player* bot = sRandomPlayerbotMgr.GetPlayerBot(contract.botGuid);
+        if (!bot)
+        {
+            if (!sRandomPlayerbotMgr.HasPendingBotLogin(contract.botGuid))
             {
-                deletes.push_back(contract.botGuid);
-                continue;
+                sRandomPlayerbotMgr.AddPlayerBot(contract.botGuid, 0);
+                contract.loginStartedAt = now;
+                contract.loginRequested = true;
+            }
+            else if (!contract.loginRequested)
+            {
+                contract.loginStartedAt = now;
+                contract.loginRequested = true;
             }
 
-            Player* bot = sRandomPlayerbotMgr.GetPlayerBot(contract.botGuid);
-            bool const mayInitialize = contract.prepared || preparationBudget != 0;
-            bool const wasPrepared = contract.prepared;
-            if (bot && mayInitialize && !InitializeOnlineCompanion(contract, owner, bot))
+            if (contract.loginRequested &&
+                now >= contract.loginStartedAt + std::chrono::seconds(LoginTimeoutSeconds()))
             {
-                if (contract.paidCost)
-                    owner->LogModifyMoney(int32(contract.paidCost), "CompanionRecruiterRefund");
-                messages.emplace_back(owner, "A companion could not apply its requested specialization and role; its contract price was refunded.");
-                deletes.push_back(contract.botGuid);
-                continue;
-            }
-            if (!wasPrepared && contract.prepared)
-                --preparationBudget;
-
-            bool const loginTimedOut = !bot &&
-                now >= contract.createdAt + std::chrono::seconds(LoginTimeoutSeconds());
-            bool const preparationTimedOut = bot && !contract.prepared && !GetBotAI(bot) &&
-                now >= contract.createdAt + std::chrono::seconds(LoginTimeoutSeconds());
-            bool const joinTimedOut = contract.prepared && !contract.joinedOnce &&
-                now >= contract.preparedAt + std::chrono::seconds(LoginTimeoutSeconds());
-            if (loginTimedOut || preparationTimedOut || joinTimedOut)
-            {
-                if (contract.paidCost)
-                    owner->LogModifyMoney(int32(contract.paidCost), "CompanionRecruiterRefund");
-                messages.emplace_back(owner, "A companion could not join your group; its contract price was refunded.");
-                deletes.push_back(contract.botGuid);
-                continue;
-            }
-
-            auto const remaining = std::chrono::duration_cast<std::chrono::seconds>(contract.expiresAt - now).count();
-            if (remaining > 0)
-            {
-                uint32 warningMinutes = 0;
-                if (remaining <= 60 && !(contract.warningMask & 4))
+                if (!contract.joinedOnce)
                 {
-                    contract.warningMask |= 7;
-                    warningMinutes = 1;
+                    if (contract.paidCost)
+                        owner->LogModifyMoney(int32(contract.paidCost), "CompanionRecruiterRefund");
+                    messages.emplace_back(owner,
+                        "A companion could not join your group; its contract price was refunded.");
+                    deletes.push_back(contract.botGuid);
                 }
-                else if (remaining <= 300 && !(contract.warningMask & 2))
+                else
                 {
-                    contract.warningMask |= 3;
-                    warningMinutes = 5;
+                    sRandomPlayerbotMgr.CancelPendingBotLogin(contract.botGuid);
+                    contract.loginRequested = false;
                 }
-                else if (remaining <= 600 && !(contract.warningMask & 1))
-                {
-                    contract.warningMask |= 1;
-                    warningMinutes = 10;
-                }
-
-                if (warningMinutes)
-                    messages.emplace_back(owner, "Your temporary companion contract expires in " +
-                        std::to_string(warningMinutes) + (warningMinutes == 1 ? " minute." : " minutes."));
             }
+            continue;
+        }
 
-            if (now < contract.expiresAt)
-                continue;
-
-            if (IsProtected(owner))
+        contract.loginRequested = false;
+        PlayerbotAI* ai = GetBotAI(bot);
+        if (!ai)
+        {
+            if (contract.loginStartedAt == Clock::time_point{})
+                contract.loginStartedAt = now;
+            if (now >= contract.loginStartedAt + std::chrono::seconds(LoginTimeoutSeconds()))
             {
-                contract.graceExpiresAt = now + std::chrono::seconds(GraceSeconds());
-                continue;
+                if (!contract.joinedOnce)
+                {
+                    if (contract.paidCost)
+                        owner->LogModifyMoney(int32(contract.paidCost), "CompanionRecruiterRefund");
+                    messages.emplace_back(owner,
+                        "A companion could not be prepared; its contract price was refunded.");
+                    deletes.push_back(contract.botGuid);
+                }
+                else
+                {
+                    contract.suspended = true;
+                    sRandomPlayerbotMgr.LogoutPlayerBot(contract.botGuid, true);
+                    contract.suspended = false;
+                    contract.loginStartedAt = {};
+                }
             }
+            continue;
+        }
 
-            if (contract.graceExpiresAt == Clock::time_point{})
-                contract.graceExpiresAt = now + std::chrono::seconds(GraceSeconds());
-            if (now >= contract.graceExpiresAt)
-                deletes.push_back(contract.botGuid);
+        bool const mayInitialize = contract.prepared || preparationBudget != 0;
+        if (!mayInitialize)
+            continue;
+        if (!contract.prepared)
+            --preparationBudget;
+        if (!InitializeOnlineCompanion(contract, owner, bot))
+        {
+            if (!contract.joinedOnce && contract.paidCost)
+                owner->LogModifyMoney(int32(contract.paidCost), "CompanionRecruiterRefund");
+            messages.emplace_back(owner,
+                "A companion could not apply its requested specialization and role; its contract was cancelled.");
+            deletes.push_back(contract.botGuid);
+            continue;
+        }
+
+        if (contract.prepared && !contract.joinedOnce &&
+            now >= contract.preparedAt + std::chrono::seconds(LoginTimeoutSeconds()))
+        {
+            if (contract.paidCost)
+                owner->LogModifyMoney(int32(contract.paidCost), "CompanionRecruiterRefund");
+            messages.emplace_back(owner,
+                "A companion could not join your group; its contract price was refunded.");
+            deletes.push_back(contract.botGuid);
+        }
     }
 
     for (uint32 guid : deletes)
@@ -2029,20 +2548,27 @@ void UpdateBanter()
     {
         Player* owner = ObjectAccessor::FindConnectedPlayer(ObjectGuid(HIGHGUID_PLAYER, ownerGuid));
         Player* bot = sRandomPlayerbotMgr.GetPlayerBot(botGuid);
-        if (!owner || !bot || !GetBotAI(bot) || !owner->IsInWorld() || !bot->IsInWorld() ||
-            owner->IsInCombat() || owner->IsDead() || bot->IsInCombat() || bot->IsDead() ||
-            owner->IsBeingTeleported() || bot->IsBeingTeleported())
+        if (!owner || !bot || !GetBotAI(bot))
             return;
         Group* group = owner->GetGroup();
-        // Keeping each speaker within 30 yards of the owner also keeps any
-        // two speakers within 60 yards of each other.
-        if (!group || bot->GetGroup() != group || owner->GetMapId() != bot->GetMapId() ||
-            owner->GetDistance(bot) > 30.0f)
+        if (!group || bot->GetGroup() != group)
             return;
+
+        // Membership keeps the cooldown alive even when combat, death, travel,
+        // or distance temporarily makes this cohort unable to speak.
         BanterCohort& cohort = byOwnerAndGroup[{group->GetId(), ownerGuid}];
         cohort.ownerGuid = ownerGuid;
         cohort.group = group;
         cohort.team = owner->GetTeam();
+        if (!owner->IsInWorld() || !bot->IsInWorld() ||
+            owner->IsInCombat() || owner->IsDead() || bot->IsInCombat() || bot->IsDead() ||
+            owner->IsBeingTeleported() || bot->IsBeingTeleported())
+            return;
+        // Keeping each speaker within 30 yards of the owner also keeps any
+        // two speakers within 60 yards of each other.
+        if (owner->GetMapId() != bot->GetMapId() ||
+            owner->GetDistance(bot) > 30.0f)
+            return;
         if (std::find(cohort.bots.begin(), cohort.bots.end(), botGuid) == cohort.bots.end())
             cohort.bots.push_back(botGuid);
     };
@@ -2068,10 +2594,19 @@ void UpdateBanter()
     }
 
     for (auto itr = gBanterStates.begin(); itr != gBanterStates.end(); )
-        if (cohorts.find(itr->first) == cohorts.end())
+    {
+        if (byOwnerAndGroup.find({itr->first, itr->second.ownerGuid}) == byOwnerAndGroup.end())
             itr = gBanterStates.erase(itr);
         else
+        {
+            if (cohorts.find(itr->first) == cohorts.end())
+            {
+                itr->second.activeScriptId = 0;
+                itr->second.speakers.clear();
+            }
             ++itr;
+        }
+    }
 
     for (auto const& pair : cohorts)
     {
@@ -2424,13 +2959,15 @@ public:
             SendMainMenu(player, creature);
             return true;
         }
-        if (action >= ACTION_OWNED_TOGGLE_BASE && action < ACTION_OWNED_TOGGLE_BASE + MaxOwnedCompanions())
+        if (action >= ACTION_OWNED_TOGGLE_BASE && action < ACTION_OWNED_REMOVE_BASE &&
+            action - ACTION_OWNED_TOGGLE_BASE < CountOwnedCompanions(player->GetGUIDLow()))
         {
             ToggleOwnedCompanion(player, action - ACTION_OWNED_TOGGLE_BASE);
             SendManageMenu(player, creature);
             return true;
         }
-        if (action >= ACTION_OWNED_REMOVE_BASE && action < ACTION_OWNED_REMOVE_BASE + MaxOwnedCompanions())
+        if (action >= ACTION_OWNED_REMOVE_BASE && action < ACTION_MANAGE_PREVIOUS &&
+            action - ACTION_OWNED_REMOVE_BASE < CountOwnedCompanions(player->GetGUIDLow()))
         {
             RemoveOwnedCompanion(player, action - ACTION_OWNED_REMOVE_BASE);
             SendManageMenu(player, creature);
@@ -2512,6 +3049,7 @@ public:
     void OnStartup() override
     {
         EnsureRecruiterSpecPaths();
+        LoadTemporaryContracts();
         LoadOwnedCompanions();
         LoadBanter();
         QueryResult* result = CharacterDatabase.PQuery(
@@ -2527,8 +3065,10 @@ public:
         }
 
         for (uint32 botGuid : staleBots)
-            DeleteCompanion(botGuid);
-        UpdateOwnedCompanions();
+            if (gContracts.find(botGuid) == gContracts.end())
+                DeleteCompanion(botGuid);
+        uint32 preparationBudget = PreparationsPerUpdate();
+        UpdateOwnedCompanions(preparationBudget);
     }
 
     void OnUpdate(uint32 diff) override
@@ -2540,8 +3080,9 @@ public:
         if (gUpdateTimer < 1000)
             return;
         gUpdateTimer = 0;
-        UpdateContracts();
-        UpdateOwnedCompanions();
+        uint32 preparationBudget = PreparationsPerUpdate();
+        UpdateContracts(preparationBudget);
+        UpdateOwnedCompanions(preparationBudget);
     }
 };
 
@@ -2549,7 +3090,21 @@ class CompanionRecruiterPlayer : public PlayerScript
 {
 public:
     CompanionRecruiterPlayer() : PlayerScript("companion_recruiter_player",
-        {PLAYERHOOK_ON_BEFORE_LOGOUT, PLAYERHOOK_ON_DELETE}) {}
+        {PLAYERHOOK_ON_LOGIN, PLAYERHOOK_ON_GIVE_EXP, PLAYERHOOK_ON_BEFORE_LOGOUT, PLAYERHOOK_ON_DELETE}) {}
+
+    void OnLogin(Player* player) override
+    {
+        if (IsRecruiterCompanion(player))
+            player->SetXPGain(false);
+    }
+
+    void OnGiveXP(Player* player, uint32& amount, Unit* /*victim*/) override
+    {
+        // Include bots waiting for preparation: a cheap contract cannot level
+        // up through combat or quests before its paid-for setup is ready.
+        if (IsRecruiterCompanion(player))
+            amount = 0;
+    }
 
     void OnBeforeLogout(Player* player) override
     {
@@ -2557,7 +3112,7 @@ public:
             gFillRoleSessions.erase(player->GetGUIDLow());
         if (player && !GetBotAI(player))
         {
-            RequestDismissOwner(player->GetGUIDLow());
+            SuspendOwnerContracts(player->GetGUIDLow());
             for (auto& pair : gOwnedCompanions)
                 if (pair.second.ownerGuid == player->GetGUIDLow())
                     DismissOwnedCompanion(pair.second);
@@ -2568,6 +3123,15 @@ public:
     {
         uint32 const ownerGuid = guid.GetCounter();
         gFillRoleSessions.erase(ownerGuid);
+        std::vector<uint32> temporary;
+        for (auto const& pair : gContracts)
+            if (pair.second.ownerGuid == ownerGuid)
+                temporary.push_back(pair.first);
+        for (uint32 botGuid : temporary)
+        {
+            gContracts.erase(botGuid);
+            DeleteCompanion(botGuid);
+        }
         std::vector<uint32> owned;
         for (auto const& pair : gOwnedCompanions)
             if (pair.second.ownerGuid == ownerGuid)
@@ -2611,7 +3175,9 @@ public:
     void OnRemoveMember(Group* group, ObjectGuid guid, uint8 /*method*/) override
     {
         uint32 const removedGuid = guid.GetCounter();
-        RequestDismiss(removedGuid);
+        auto temporary = gContracts.find(removedGuid);
+        if (temporary == gContracts.end() || !temporary->second.suspended)
+            RequestDismiss(removedGuid);
 
         auto owned = gOwnedCompanions.find(removedGuid);
         if (owned != gOwnedCompanions.end())
@@ -2620,7 +3186,7 @@ public:
         Player* removedPlayer = ObjectAccessor::FindConnectedPlayer(guid);
         if (removedPlayer && !GetBotAI(removedPlayer))
         {
-            RequestDismissOwner(removedGuid);
+            RequestDismissOwnerFromGroup(removedGuid);
             for (auto& pair : gOwnedCompanions)
                 if (pair.second.ownerGuid == removedGuid)
                     pair.second.invited = false;
@@ -2634,7 +3200,7 @@ public:
         for (GroupReference* ref = group->GetFirstMember(); ref; ref = ref->next())
             if (Player* player = ref->getSource(); player && !GetBotAI(player))
             {
-                RequestDismissOwner(player->GetGUIDLow());
+                RequestDismissOwnerFromGroup(player->GetGUIDLow());
                 for (auto& pair : gOwnedCompanions)
                     if (pair.second.ownerGuid == player->GetGUIDLow())
                         pair.second.invited = false;
@@ -2646,16 +3212,25 @@ public:
 void Addmod_companion_recruiterScripts()
 {
     sPlayerbotAIConfig.companionRecruiterRegistered = true;
+    sPlayerbotAIConfig.companionRecruiterOnTalentSpecsLoaded = ReloadRecruiterSpecPaths;
     sPlayerbotAIConfig.companionRecruiterAllowsLogin = [](uint32 botGuid)
     {
         if (!IsEnabled())
             return false;
 
         auto contract = gContracts.find(botGuid);
-        if (contract != gContracts.end() && contract->second.expiresAt > Clock::now() &&
-            sRandomPlayerbotMgr.GetValue(botGuid, "companion_recruiter") == contract->second.ownerGuid &&
-            ObjectAccessor::FindConnectedPlayer(ObjectGuid(HIGHGUID_PLAYER, contract->second.ownerGuid)))
-            return true;
+        if (contract != gContracts.end() && contract->second.expiresAtUnix)
+        {
+            Player* owner = ObjectAccessor::FindConnectedPlayer(
+                ObjectGuid(HIGHGUID_PLAYER, contract->second.ownerGuid));
+            uint64 const nowUnix = UnixNow();
+            bool const active = contract->second.expiresAtUnix > nowUnix ||
+                contract->second.graceExpiresAtUnix > nowUnix ||
+                (owner && IsProtected(owner) && contract->second.expiresAtUnix <= nowUnix);
+            if (active && owner &&
+                sRandomPlayerbotMgr.GetValue(botGuid, "companion_recruiter") == contract->second.ownerGuid)
+                return true;
+        }
 
         auto owned = gOwnedCompanions.find(botGuid);
         return owned != gOwnedCompanions.end() && owned->second.invited &&

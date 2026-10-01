@@ -10,7 +10,9 @@ from pathlib import Path
 from banter_replacements import REPLACEMENTS, speaker_count as repl_speaker_count
 
 ROOT = Path(__file__).resolve().parents[1]
-SQL = ROOT / "data/sql/world/0003_companion_banter.sql"
+SQL = ROOT / "data/sql/world.sql"
+SQL_SECTION_START = "-- BEGIN SOURCE: data/sql/world/0003_companion_banter.sql"
+SQL_SECTION_END = "-- END SOURCE: data/sql/world/0003_companion_banter.sql"
 
 comment_re = re.compile(
     r"^-- (\d+)[,\s]*\((\d+),\s*(neutral|Alliance|Horde),\s*(\d+)\)\s*(.*)$"
@@ -369,7 +371,11 @@ def write_sql(scripts):
             pieces.append(prefix + row + suffix)
         out.append("\n".join(pieces))
         out.append("")
-    SQL.write_text("\n".join(out).rstrip() + "\n", encoding="utf-8")
+    source = SQL.read_text(encoding="utf-8")
+    start = source.index(SQL_SECTION_START) + len(SQL_SECTION_START)
+    end = source.index(SQL_SECTION_END, start)
+    banter = "\n" + "\n".join(out).rstrip() + "\n"
+    SQL.write_text(source[:start] + banter + source[end:], encoding="utf-8")
 
 
 def main() -> int:

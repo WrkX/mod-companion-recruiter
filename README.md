@@ -14,27 +14,54 @@ the older persistent companion implementation in [`WrkX/core`](https://github.co
 - Uses the PlayerBots random-account allocator instead of creating ad-hoc accounts.
 - Charges only after character creation succeeds.
 - Initializes level-appropriate spells, skills, equipment, supplies, and pets explicitly for externally managed bots.
-- Paces expensive preparation work so filling a raid does not initialize every bot in one world tick.
+- Shares one preparation budget between temporary recruitment and permanent summons, so a raid does not initialize every bot in one world tick.
 - Reserves pending group slots and refunds contracts that cannot log in and join in time.
+- Companions preserve the group's chosen leadership when joining or reconnecting.
+- Persists paid temporary contracts across owner logout and world-server restarts, reconnecting their companions until the original absolute contract deadline.
 - Deletes temporary characters after the configurable contract lifetime.
-- Protects expired contracts while the owner is dead or inside an instance, followed by a grace period.
-- Cleans up when the owner logs out, leaves the group, dismisses the companions, or the server restarts.
+- Protects expired contracts while the owner is dead or inside an instance. The grace period counts down outside protection and pauses while protected, without resetting on re-entry.
+- Suspends companions while their owner is offline and cleans them up when the owner leaves the group, dismisses them, deletes the owning character, or their contract expires.
 - Sells permanent companions that are stored in a character-owned roster and can be invited again for free.
 - Keeps permanent companion ownership private to the purchasing character, with a configurable roster limit.
-- Catches permanent companions up to their owner's level when invited or when the owner levels up.
-- Regenerates permanent companions' class-appropriate gear at first initialization and after level catch-up;
-  at level 55 and above, equipment selection follows the owner's equipped gear score when available.
+- Sets temporary companions up at the level they were purchased at; active companions do not gain XP or follow their owner's later level-ups.
+- Prepares permanent companions once per summon, catching them up to the owner's level captured at the invitation and refreshing their talents, spells, gear, supplies, and pets.
+- Targets bot level + 5 below level 55, and the owner's average equipped item level (at least 55) from level 55 onward, with configurable preferred and fallback ranges. Summoned companions keep their setup until dismissed; summon them again to refresh it.
 
-Contracts are intentionally process-local: restarting the world server invalidates and deletes every active
-recruiter contract instead of attempting to restore its remaining duration.
+Paid temporary contracts are stored in the character database. Logging out or restarting the world server
+logs the companion out without cancelling the purchase; it reconnects when the owner returns, provided the
+original absolute contract deadline (or an active expiry-protection grace period) has not elapsed.
 
 Temporary contracts last three hours by default. Their gold price increases at every player level,
 interpolating from 1 silver at level 10 through 30 silver at level 40 to 1 gold at level 60.
 Permanent companions cost a flat 75 gold at every level. The temporary multiplier, permanent gold
 price, and contract duration can be adjusted in `mod_companion_recruiter.conf`.
 
+Equipment generation targets **bot level + 5** for bots below level 55. At level 55 and above,
+it targets **max(55, owner's average equipped item level)**. The average excludes empty slots,
+shirts, and tabards, and rounds to the nearest item level. Each slot first tries suitable items within
+`CompanionRecruiter.GearItemLevelRange` (default **±5**). If none can be equipped, it tries
+`CompanionRecruiter.GearItemLevelFallbackRange` (default **±15**), then the closest suitable lower item.
+The fallback's upper limit and `AiPlayerbot.RandomGearMaxLevel` remain hard caps. Within each range,
+items closest to the target are preferred, with specialization stat weights breaking ties. Class,
+level, faction, uniqueness, and blacklist restrictions still apply. Scarce slots may consequently
+fall below the target; the finished outfit's average is not an exact guarantee.
+
+For example, a level **40** bot targets **45**, preferring item levels **40–50** and widening a missing
+slot to **30–60** before considering older gear. A level **55** bot targets **55** if the owner's
+average is lower or no items are equipped, or **70** if the owner's average is 70. This minimum
+applies to the target, not to each generated item. Both range settings are clamped to 0–100, and the
+fallback cannot be narrower than the preferred range. The target and ranges are captured when
+buying/summoning, so changing equipment while a bot waits for preparation does not change that
+generation. Permanent companions use their level after catching up to the captured owner level.
+
+Generated equipment is enchanted only when its item level is strictly greater than
+`CompanionRecruiter.EnchantItemLevelThreshold` (default **65**). This applies equally to role-only,
+specialization-selected, party-fill, raid-fill, temporary, and permanent companions. Set the threshold to
+`0` to use PlayerBots' normal level-based enchanting behavior.
+
 The recruiter uses PlayerBots' configured talent paths where they cover a specialization. For any missing
-tree it creates a valid progression path from that class's available talents, so every Vanilla tree can be
+tree it creates a valid progression path from that class's available talents, spilling into other trees
+when the requested tree is full while keeping it the main specialization, so every Vanilla tree can be
 selected; those generated paths are functional defaults rather than hand-tuned raid builds.
 
 The separate Gurubashi arena automation from the AzerothCore repository is intentionally outside the
@@ -71,16 +98,26 @@ The world migrations create twelve level-60 recruiter variants (`919001` through
 same `npc_companion_recruiter` gossip script. The original fixed Stormwind and Orgrimmar spawns are
 removed so the final locations can be placed by a GM. See [SPAWN_COMMANDS.md](SPAWN_COMMANDS.md)
 for the entry and display ID mapping and the in-game spawn commands.
-The character migrations create `companion_recruiter_owned`, which stores each permanent companion's
-owner, purchase metadata, role, and specialization. Existing role-only companions receive a matching
-default specialization when the new migration runs.
+The template SQL removes the inherited invisible trigger flag from all recruiter variants and uses
+the title and greeting **Companion Guild**. For an existing world, apply the two `creature_template`
+and `broadcast_text` UPDATE statements in the section marked `0002_companion_recruiter_variants.sql`
+in `data/sql/world.sql`, then restart the world server to make existing recruiters visible outside GM mode.
+The consolidated world SQL updates existing Goblin and neutral recruiter
+models to their current display IDs.
+The consolidated character SQL creates `companion_recruiter_owned`, which stores each permanent companion's
+owner, purchase metadata, role, and specialization, and `companion_recruiter_contract`, which stores active
+paid temporary contracts and their absolute deadlines. Existing role-only permanent companions receive a
+matching default specialization when the new migration runs.
 
 ## Client addon
 
 Copy `addon/CompanionRecruiter` into the Vanilla 1.12 client's `Interface/AddOns` directory.
 Enable **Companion Recruiter** on the character selection AddOns screen, then speak to a
-Companion Recruiter in Stormwind or Orgrimmar. The addon replaces only that NPC's gossip
-window. If the addon is disabled, the regular gossip menu still works.
+Companion Recruiter in Stormwind or Orgrimmar. Recruitment uses the addon's own window;
+the stock gossip frame is suppressed for this NPC's recruitment responses.
+Keep the addon and server module updated together. In particular, the permanent-recruitment
+transport fix requires rebuilding and restarting the server as well as updating the addon.
+Copying only the Lua file cannot repair an oversized response from an older server build.
 Use `/crdebug` to open or close a visual preview anywhere. Browse the tabs, class and specialization choices, and party or raid flow in preview mode. Purchases,
 invitations, and dismissals remain disabled until you speak to the NPC. The sample roster is
 only shown in preview mode.
@@ -100,7 +137,10 @@ again later without another charge.
 
 The integration also adds `PlayerbotFactory::InitializeAtCurrentLevel()` to this TortoiseWoW fork. That
 hook initializes an externally managed bot without changing its requested level or depending on the
-global random-level and auto-learn settings. Its optional master gear sync uses PlayerBots' existing
-item-level cap when preparing a permanent companion.
+global random-level and auto-learn settings. Its optional `EquipmentItemLevelTarget` carries the
+captured equipment average and ranges into PlayerBots' equipment selection without changing normal
+random-bot generation.
 
 This module is written for the TortoiseWoW APIs and is not a drop-in AzerothCore module.
+
+See [tests/README.md](tests/README.md) for the standalone checks, their coverage, and prerequisites.

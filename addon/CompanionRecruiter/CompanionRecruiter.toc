@@ -1,6 +1,6 @@
 ## Interface: 11200
 ## Title: Companion Recruiter
-## Notes: A recruitment window for the Adventure Guild companion recruiter.
+## Notes: A recruitment window for the Companion Guild recruiter.
 ## Author: TurtleDev
 ## Version: 0.3
 
