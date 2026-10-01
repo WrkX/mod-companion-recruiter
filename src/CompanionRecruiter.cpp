@@ -1826,10 +1826,20 @@ void NotifyOwnerCannotLeadGroup(Player* owner, Group* group, Player* bot)
     when = now;
 
     std::string const leaderName = group->GetLeaderName();
-    sLog.outError("Companion join blocked: owner=%s guid=%u group=%u leader=%s leaderGuid=%u bot=%s guid=%u botGroup=%u",
-        owner->GetName(), owner->GetGUIDLow(), group->GetId(), leaderName.c_str(),
-        group->GetLeaderGuid().GetCounter(), bot ? bot->GetName() : "?", bot ? bot->GetGUIDLow() : 0u,
-        bot && bot->GetGroup() ? bot->GetGroup()->GetId() : 0u);
+    std::string members;
+    for (Group::MemberSlot const& slot : group->GetMemberSlots())
+        members += (members.empty() ? "" : ",") + slot.name + ":" + std::to_string(slot.guid.GetCounter());
+    Group* botGroup = bot ? bot->GetGroup() : nullptr;
+    Group* originalGroup = owner->GetOriginalGroup();
+    sLog.outError("Companion join blocked: owner=%s guid=%u group=%u created=%u bg=%u raid=%u ownerIsMember=%u "
+        "leader=%s leaderGuid=%u members=[%s] originalGroup=%u bot=%s guid=%u botGroup=%u botGroupLeader=%u "
+        "ownerMap=%u ownerInstance=%u",
+        owner->GetName(), owner->GetGUIDLow(), group->GetId(), group->IsCreated() ? 1u : 0u,
+        group->isBGGroup() ? 1u : 0u, group->isRaidGroup() ? 1u : 0u,
+        group->IsMember(owner->GetObjectGuid()) ? 1u : 0u, leaderName.c_str(),
+        group->GetLeaderGuid().GetCounter(), members.c_str(), originalGroup ? originalGroup->GetId() : 0u,
+        bot ? bot->GetName() : "?", bot ? bot->GetGUIDLow() : 0u, botGroup ? botGroup->GetId() : 0u,
+        botGroup ? botGroup->GetLeaderGuid().GetCounter() : 0u, owner->GetMapId(), owner->GetInstanceId());
     SendMessage(owner, "Companions can only join a group you lead (current leader: " +
         (leaderName.empty() ? std::string("unknown") : leaderName) + ").");
 }
@@ -1862,6 +1872,14 @@ bool EnsureCompanionInGroup(Player* owner, Player* bot)
             return false;
 
         ObjectGuid const ownerGuid = owner->GetObjectGuid();
+        // A group without a leader (left behind by a disband) cannot be led by
+        // anyone. If the owner is still a member, give them the lead back.
+        if (group->GetLeaderGuid().IsEmpty() && group->IsMember(ownerGuid))
+        {
+            sLog.outError("Companion recruiter: group %u had no leader; restoring %s as leader.",
+                group->GetId(), owner->GetName());
+            group->ChangeLeader(ownerGuid);
+        }
         if (!group->IsLeader(ownerGuid) && !(group->isRaidGroup() && group->IsAssistant(ownerGuid)))
         {
             NotifyOwnerCannotLeadGroup(owner, group, bot);
@@ -1992,8 +2010,15 @@ void BringCompanionToOwner(Player* owner, Player* bot)
     if (!IsSafeTeleportTarget(owner) || !bot || !bot->IsAlive() ||
         bot->IsBeingTeleported() || bot->IsTaxiFlying() || bot->IsFlying())
         return;
-    if (!owner->IsInGroup(bot, true) || CompanionIsWithOwner(owner, bot))
+    if (CompanionIsWithOwner(owner, bot))
         return;
+    // Outside dungeons the companion follows its owner whether or not group
+    // membership is currently in sync; dungeons still require the group bind.
+    if (!owner->IsInGroup(bot, true) && owner->GetMap() && owner->GetMap()->IsDungeon())
+    {
+        LogCompanionTravelBlocked(owner, bot, "companion not in owner's group inside a dungeon");
+        return;
+    }
 
     Group* group = owner->GetGroup();
     Map* ownerMap = owner->GetMap();
@@ -2185,7 +2210,7 @@ void DismissOwnedCompanion(OwnedCompanion& companion)
     if (Player* bot = sRandomPlayerbotMgr.GetPlayerBot(companion.botGuid))
     {
         if (bot->GetGroup())
-            bot->GetGroup()->RemoveMember(bot->GetObjectGuid(), GROUP_LEAVE);
+            bot->RemoveFromGroup();
         sRandomPlayerbotMgr.LogoutPlayerBot(companion.botGuid, true);
     }
 }
@@ -2319,7 +2344,7 @@ void SuspendTemporaryCompanion(CompanionContract& contract)
     if (Player* bot = sRandomPlayerbotMgr.GetPlayerBot(contract.botGuid))
     {
         if (bot->GetGroup())
-            bot->GetGroup()->RemoveMember(bot->GetObjectGuid(), GROUP_LEAVE);
+            bot->RemoveFromGroup();
         sRandomPlayerbotMgr.LogoutPlayerBot(contract.botGuid, true);
     }
 }
