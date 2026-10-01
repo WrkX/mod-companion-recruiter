@@ -20,6 +20,7 @@ struct ObjectGuid {
     uint32 value = 0;
     ObjectGuid(uint32 v = 0) : value(v) {}
     uint32 GetCounter() const { return value; }
+    bool IsEmpty() const { return value == 0; }
     bool operator==(ObjectGuid other) const { return value == other.value; }
 };
 struct Player;
@@ -34,6 +35,7 @@ struct Group {
     bool IsAssistant(ObjectGuid guid) const { return assistants.count(guid.value); }
     ObjectGuid GetLeaderGuid() const { return leader; }
     uint32 GetMembersCount() const { return uint32(members.size()); }
+    uint32 GetId() const { return 7; }
     bool HandleHardcoreInteraction(Player*) const { return true; }
     void RemoveInvite(Player*) {}
     bool Create(ObjectGuid guid, char const*) { leader = guid.value; members.insert(guid.value); return true; }
@@ -46,11 +48,14 @@ struct Group {
 struct Player {
     uint32 id; bool bot = false;
     Group* group = nullptr; Group* original = nullptr;
+    bool world = true, teleport = false;
     enum class HardcoreInteractionResult { Allowed };
     ObjectGuid GetObjectGuid() const { return id; }
     Group* GetGroup() const { return group; }
     Group* GetOriginalGroup() const { return original; }
     Group* GetGroupInvite() const { return nullptr; }
+    bool IsInWorld() const { return world; }
+    bool IsBeingTeleported() const { return teleport; }
     char const* GetName() const { return "fixture"; }
     bool IsInGroup(Player* other, bool) const { return group && group == other->group; }
     HardcoreInteractionResult HandleHardcoreInteraction(Player*, bool) const {
@@ -74,7 +79,8 @@ bool GetBotAI(Player* player) { return player && player->bot; }
 std::map<uint32, int> gContracts, gOwnedCompanions;
 constexpr uint32 MAX_GROUP_SIZE = 5, MAX_RAID_SIZE = 40;
 uint32 warnings = 0;
-void NotifyOwnerCannotLeadGroup(Player*) { ++warnings; }
+void NotifyOwnerCannotLeadGroup(Player*, Group*, Player*) { ++warnings; }
+struct Logger { template<class... Args> void outError(Args...) {} } sLog;
 void check(bool ok, char const* message) { if (!ok) throw std::runtime_error(message); }
 '''
 
@@ -125,6 +131,14 @@ int main() {
         EnsureCompanionInGroup(&owner, &bot);
         check(group.leader == 2, "Battleground leadership was changed");
         group.bg = false; group.members.erase(1);
+        bot.group = nullptr; group.members.erase(2); group.leader = 1;
+        owner.world = false; owner.teleport = true;
+        check(!EnsureCompanionInGroup(&owner, &bot) && !bot.group && warnings == 1,
+              "Owner zoning changed membership or reported a leader error");
+        owner.world = true; owner.teleport = false; bot.teleport = true;
+        check(!EnsureCompanionInGroup(&owner, &bot) && !bot.group && warnings == 1,
+              "Bot zoning changed membership or reported a leader error");
+        bot.teleport = false;
         check(!EnsureCompanionInGroup(nullptr, &bot), "Missing owner accepted");
         check(!EnsureCompanionInGroup(&owner, nullptr), "Missing bot accepted");
         std::cout << "PASS: existing groups, raids, offline leaders, human authority, explicit leadership\n";

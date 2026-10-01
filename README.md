@@ -17,6 +17,7 @@ the older persistent companion implementation in [`WrkX/core`](https://github.co
 - Shares one preparation budget between temporary recruitment and permanent summons, so a raid does not initialize every bot in one world tick.
 - Reserves pending group slots and refunds contracts that cannot log in and join in time.
 - Companions preserve the group's chosen leadership when joining or reconnecting.
+- Dungeon portals preserve active companion invitations and the existing group through loading screens. Once companions land, they clear movement paths from the previous map or instance.
 - Persists paid temporary contracts across owner logout and world-server restarts, reconnecting their companions until the original absolute contract deadline.
 - Deletes temporary characters after the configurable contract lifetime.
 - Protects expired contracts while the owner is dead or inside an instance. The grace period counts down outside protection and pauses while protected, without resetting on re-entry.

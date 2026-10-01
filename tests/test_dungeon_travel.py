@@ -7,9 +7,20 @@ from test_gear_generation import extract
 
 PREFIX = r'''
 #include <cstdint>
+#include <chrono>
+#include <cmath>
 #include <iostream>
+#include <map>
 #include <stdexcept>
 using uint32 = uint32_t;
+struct Clock {
+    using time_point = std::chrono::steady_clock::time_point;
+    static time_point current;
+    static time_point now() { return current; }
+};
+Clock::time_point Clock::current{std::chrono::seconds(1000)};
+float TeleportDistance() { return 100; }
+uint32 StuckSeconds() { return 8; }
 constexpr uint32 TELE_TO_NOT_LEAVE_COMBAT = 1, TELE_TO_NOT_UNSUMMON_PET = 2, TELE_TO_FORCE_MAP_CHANGE = 4;
 constexpr uint32 PLAYER_FLAGS = 0, PLAYER_FLAGS_GHOST = 1;
 struct DungeonPersistentState {};
@@ -34,9 +45,13 @@ struct Group {
 struct Player {
     bool alive = true, world = true, teleport = false, ghost = false, taxi = false, flying = false;
     bool reject = false; uint32 mapId = 33, instance = 7, teleports = 0, flags = 0;
+    bool combat = false;
+    float x = 1, y = 2;
     float distance = 200;
     Map* map = nullptr; Group* group = nullptr; InstancePlayerBind* bind = nullptr;
     bool IsAlive() const { return alive; }
+    bool IsInCombat() const { return combat; }
+    uint32 GetGUIDLow() const { return 2; }
     bool IsInWorld() const { return world; }
     bool IsBeingTeleported() const { return teleport; }
     bool IsTaxiFlying() const { return taxi; }
@@ -49,8 +64,8 @@ struct Player {
     Group* GetGroup() const { return group; }
     Map* GetMap() const { return map; }
     InstancePlayerBind* GetBoundInstance(uint32) const { return bind; }
-    float GetPositionX() const { return 1; }
-    float GetPositionY() const { return 2; }
+    float GetPositionX() const { return x; }
+    float GetPositionY() const { return y; }
     float GetPositionZ() const { return 3; }
     float GetOrientation() const { return 4; }
     bool TeleportTo(uint32, float, float, float, float, uint32 options) {
@@ -58,6 +73,8 @@ struct Player {
     }
 };
 uint32 blocked = 0;
+bool noPath = false;
+bool HasNoPathToOwner(Player*, Player*) { return noPath; }
 void LogCompanionTravelBlocked(Player*, Player*, char const*) { ++blocked; }
 void check(bool ok, char const* message) { if (!ok) throw std::runtime_error(message); }
 '''
@@ -94,6 +111,21 @@ int main() {
         bot.bind = nullptr; bot.reject = true;
         BringCompanionToOwner(&owner, &bot);
         check(blocked == 3, "Core teleport rejection was silent");
+        bot.reject = false; bot.mapId = owner.mapId; bot.instance = owner.instance;
+        bot.distance = 50; noPath = true;
+        check(!CompanionIsWithOwner(&owner, &bot), "Unwalkable path was ignored");
+        noPath = false;
+        check(CompanionIsWithOwner(&owner, &bot), "Stuck timer did not start");
+        Clock::current += std::chrono::seconds(7);
+        check(CompanionIsWithOwner(&owner, &bot), "Stuck timer fired early");
+        Clock::current += std::chrono::seconds(1);
+        check(!CompanionIsWithOwner(&owner, &bot), "Stuck companion did not recover");
+        bot.combat = true; noPath = true;
+        check(CompanionIsWithOwner(&owner, &bot), "Path recovery interrupted combat");
+        bot.combat = false; noPath = false;
+        check(CompanionIsWithOwner(&owner, &bot), "Progress tracking did not restart");
+        bot.x += 11; Clock::current += std::chrono::seconds(8);
+        check(CompanionIsWithOwner(&owner, &bot), "Moving companion was classified as stuck");
         std::cout << "PASS: dead-bot guard, dungeon binding, forced instance change, exit/re-entry, rejection diagnostics\n";
     } catch (std::exception const& error) {
         std::cerr << "FAIL: " << error.what() << '\n'; return 1;
@@ -104,7 +136,8 @@ int main() {
 
 if __name__ == "__main__":
     cpp = (Path(__file__).resolve().parents[1] / "src/CompanionRecruiter.cpp").read_text(encoding="utf-8")
-    source = PREFIX
+    source = PREFIX + extract(cpp, "struct FollowProgress", ";")
+    source += "std::map<uint32, FollowProgress> gFollowProgress;\n"
     for signature in ("bool IsSafeTeleportTarget(", "bool CompanionIsWithOwner(", "void BringCompanionToOwner("):
         source += extract(cpp, signature)
     compile_and_run(source + CHECKS)

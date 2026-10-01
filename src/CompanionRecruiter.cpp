@@ -200,6 +200,7 @@ struct OwnedCompanion
 // Gossip, player, group, and world update hooks all execute on the world thread.
 std::map<uint32, CompanionContract> gContracts;
 std::map<uint32, OwnedCompanion> gOwnedCompanions;
+std::map<uint32, std::pair<uint32, uint32>> gCompanionLocations;
 uint32 gUpdateTimer = 0;
 bool gRecruiterSpecPathsInitialized = false;
 std::map<uint32, uint32> gManagePages;
@@ -715,11 +716,20 @@ void RequestDismissOwnerFromGroup(uint32 ownerGuid)
     }
 }
 
+Player* FindCompanionOwner(uint32 ownerGuid)
+{
+    // In this core FindConnectedPlayer aliases FindPlayer, which excludes
+    // players between maps. A loading screen is not an owner logout.
+    Player* owner = ObjectAccessor::FindPlayerNotInWorld(ObjectGuid(HIGHGUID_PLAYER, ownerGuid));
+    return owner && owner->GetSession() && !owner->GetSession()->PlayerLogout() ? owner : nullptr;
+}
+
 void DeleteCompanion(uint32 botGuid)
 {
     if (!botGuid)
         return;
 
+    gCompanionLocations.erase(botGuid);
     sRandomPlayerbotMgr.SetValue(botGuid, "create levelup", 0);
     sRandomPlayerbotMgr.SetValue(botGuid, "create gear", 0);
     sRandomPlayerbotMgr.SetValue(botGuid, "create group", 0);
@@ -742,7 +752,7 @@ bool ContractTargetsRecruitingGroup(CompanionContract const& contract, Player* r
     if (!group)
         return contract.ownerGuid == recruiter->GetGUIDLow();
 
-    Player* contractOwner = ObjectAccessor::FindConnectedPlayer(ObjectGuid(HIGHGUID_PLAYER, contract.ownerGuid));
+    Player* contractOwner = FindCompanionOwner(contract.ownerGuid);
     return contractOwner && contractOwner->GetGroup() == group;
 }
 
@@ -777,8 +787,7 @@ bool OwnedCompanionTargetsRecruitingGroup(OwnedCompanion const& companion, Playe
     if (!group)
         return companion.ownerGuid == recruiter->GetGUIDLow();
 
-    Player* companionOwner = ObjectAccessor::FindConnectedPlayer(
-        ObjectGuid(HIGHGUID_PLAYER, companion.ownerGuid));
+    Player* companionOwner = FindCompanionOwner(companion.ownerGuid);
     return companionOwner && companionOwner->GetGroup() == group;
 }
 
@@ -2104,6 +2113,27 @@ bool PrepareOnlineCompanion(CompanionContract& contract, Player* bot, PlayerbotA
     return true;
 }
 
+void MaintainCompanionFollow(Player* owner, Player* bot, PlayerbotAI* ai, bool startFollowing)
+{
+    // The core's teleport ACK uses Reset() without clearing cached movement.
+    // Clear paths from the previous map/instance once the bot has landed.
+    auto const location = std::make_pair(bot->GetMapId(), bot->GetInstanceId());
+    auto const previous = gCompanionLocations.find(bot->GetGUIDLow());
+    if (previous != gCompanionLocations.end() && previous->second != location)
+        ai->Reset(true);
+    gCompanionLocations[bot->GetGUIDLow()] = location;
+
+    // Preparation rebuilds strategies. Apply follow afterwards, even if the
+    // master was already assigned. Later maintenance preserves stay commands.
+    if (ai->GetMaster() != owner)
+    {
+        ai->SetMaster(owner);
+        startFollowing = true;
+    }
+    if (startFollowing)
+        ai->ChangeStrategy("+follow", BotState::BOT_STATE_NON_COMBAT);
+}
+
 bool InitializeOnlineCompanion(CompanionContract& contract, Player* owner, Player* bot)
 {
     PlayerbotAI* ai = GetBotAI(bot);
@@ -2113,6 +2143,7 @@ bool InitializeOnlineCompanion(CompanionContract& contract, Player* owner, Playe
     bot->SetXPGain(false);
     ai->SetForcedRole(uint8(contract.role));
 
+    bool const needsFollow = !contract.prepared;
     if (!contract.prepared)
     {
         if (!PrepareOnlineCompanion(contract, bot, ai))
@@ -2121,11 +2152,7 @@ bool InitializeOnlineCompanion(CompanionContract& contract, Player* owner, Playe
     }
 
     Player* commandMaster = GetCommandMaster(owner);
-    if (ai->GetMaster() != commandMaster)
-    {
-        ai->SetMaster(commandMaster);
-        ai->ChangeStrategy("+follow", BotState::BOT_STATE_NON_COMBAT);
-    }
+    MaintainCompanionFollow(commandMaster, bot, ai, needsFollow);
 
     EnsureCompanionInGroup(owner, bot);
     BringCompanionToOwner(commandMaster, bot);
@@ -2145,11 +2172,9 @@ bool InitializeOwnedCompanion(OwnedCompanion& companion, Player* owner, Player* 
         return false;
 
     ai->SetForcedRole(uint8(companion.role));
+    bool const needsFollow = !companion.prepared || ai->GetMaster() != owner;
     if (ai->GetMaster() != owner)
-    {
         ai->SetMaster(owner);
-        ai->ChangeStrategy("+follow", BotState::BOT_STATE_NON_COMBAT);
-    }
 
     if (!companion.prepared)
     {
@@ -2180,11 +2205,7 @@ bool InitializeOwnedCompanion(OwnedCompanion& companion, Player* owner, Player* 
         return true;
 
     Player* commandMaster = owner;
-    if (ai->GetMaster() != commandMaster)
-    {
-        ai->SetMaster(commandMaster);
-        ai->ChangeStrategy("+follow", BotState::BOT_STATE_NON_COMBAT);
-    }
+    MaintainCompanionFollow(commandMaster, bot, ai, needsFollow);
 
     EnsureCompanionInGroup(owner, bot);
     BringCompanionToOwner(commandMaster, bot);
@@ -2201,6 +2222,7 @@ void EnsureOwnedCompanionOnline(OwnedCompanion& companion)
 
 void DismissOwnedCompanion(OwnedCompanion& companion)
 {
+    gCompanionLocations.erase(companion.botGuid);
     companion.invited = false;
     companion.prepared = false;
     companion.summonLevel = 0;
@@ -2221,7 +2243,7 @@ void UpdateOwnedCompanions(uint32& preparationBudget)
     for (auto& pair : gOwnedCompanions)
     {
         OwnedCompanion& companion = pair.second;
-        Player* owner = ObjectAccessor::FindConnectedPlayer(ObjectGuid(HIGHGUID_PLAYER, companion.ownerGuid));
+        Player* owner = FindCompanionOwner(companion.ownerGuid);
         Player* bot = sRandomPlayerbotMgr.GetPlayerBot(companion.botGuid);
         if (!owner)
         {
@@ -2231,6 +2253,15 @@ void UpdateOwnedCompanions(uint32& preparationBudget)
         }
         if (companion.invited)
         {
+            // Do not prepare, time out, or change membership during a portal
+            // transfer. Both players keep their group through the load screen.
+            if (!owner->IsInWorld() || owner->IsBeingTeleported() ||
+                (bot && (!bot->IsInWorld() || bot->IsBeingTeleported())))
+            {
+                if (companion.inviteStartedAt != Clock::time_point{})
+                    companion.inviteStartedAt = now;
+                continue;
+            }
             bool const following = bot && owner->IsInGroup(bot, true);
             if (following)
                 companion.inviteStartedAt = {};
@@ -2337,6 +2368,7 @@ bool RemoveOwnedCompanion(Player* owner, uint32 index)
 
 void SuspendTemporaryCompanion(CompanionContract& contract)
 {
+    gCompanionLocations.erase(contract.botGuid);
     contract.suspended = true;
     contract.initialized = false;
     contract.loginRequested = false;
@@ -2395,7 +2427,17 @@ void UpdateContracts(uint32& preparationBudget)
             continue;
         }
 
-        Player* owner = ObjectAccessor::FindConnectedPlayer(ObjectGuid(HIGHGUID_PLAYER, contract.ownerGuid));
+        Player* owner = FindCompanionOwner(contract.ownerGuid);
+        Player* bot = sRandomPlayerbotMgr.GetPlayerBot(contract.botGuid);
+        if (owner && (!owner->IsInWorld() || owner->IsBeingTeleported()))
+        {
+            // Absolute contract expiry remains unchanged. Only pending login
+            // and preparation deadlines wait for the transfer to complete.
+            contract.loginStartedAt = now;
+            if (contract.prepared && !contract.joinedOnce)
+                contract.preparedAt = now;
+            continue;
+        }
 
         if (owner && contract.expiresAtUnix > nowUnix)
         {
@@ -2446,11 +2488,18 @@ void UpdateContracts(uint32& preparationBudget)
             continue;
         }
 
+        if (bot && (!bot->IsInWorld() || bot->IsBeingTeleported()))
+        {
+            contract.loginStartedAt = now;
+            if (contract.prepared && !contract.joinedOnce)
+                contract.preparedAt = now;
+            continue;
+        }
+
         bool const wasSuspended = contract.suspended;
         contract.suspended = false;
         if (wasSuspended && contract.prepared && !contract.joinedOnce)
             contract.preparedAt = now;
-        Player* bot = sRandomPlayerbotMgr.GetPlayerBot(contract.botGuid);
         if (!bot)
         {
             if (!sRandomPlayerbotMgr.HasPendingBotLogin(contract.botGuid))
@@ -3272,8 +3321,7 @@ public:
         if (owned == gOwnedCompanions.end())
             return true;
 
-        Player* owner = ObjectAccessor::FindConnectedPlayer(
-            ObjectGuid(HIGHGUID_PLAYER, owned->second.ownerGuid));
+        Player* owner = FindCompanionOwner(owned->second.ownerGuid);
         if (!owner || (owner->GetGroup() != group &&
             (group->IsCreated() || group->GetLeaderGuid() != owner->GetObjectGuid())))
             return false;
@@ -3330,12 +3378,12 @@ void Addmod_companion_recruiterScripts()
         auto contract = gContracts.find(botGuid);
         if (contract != gContracts.end() && contract->second.expiresAtUnix)
         {
-            Player* owner = ObjectAccessor::FindConnectedPlayer(
-                ObjectGuid(HIGHGUID_PLAYER, contract->second.ownerGuid));
+            Player* owner = FindCompanionOwner(contract->second.ownerGuid);
             uint64 const nowUnix = UnixNow();
             bool const active = contract->second.expiresAtUnix > nowUnix ||
                 contract->second.graceExpiresAtUnix > nowUnix ||
-                (owner && IsProtected(owner) && contract->second.expiresAtUnix <= nowUnix);
+                (owner && (!owner->IsInWorld() || owner->IsBeingTeleported() || IsProtected(owner)) &&
+                    contract->second.expiresAtUnix <= nowUnix);
             if (active && owner &&
                 sRandomPlayerbotMgr.GetValue(botGuid, "companion_recruiter") == contract->second.ownerGuid)
                 return true;
@@ -3344,7 +3392,7 @@ void Addmod_companion_recruiterScripts()
         auto owned = gOwnedCompanions.find(botGuid);
         return owned != gOwnedCompanions.end() && owned->second.invited &&
             sRandomPlayerbotMgr.GetValue(botGuid, "companion_recruiter_owned") == owned->second.ownerGuid &&
-            ObjectAccessor::FindConnectedPlayer(ObjectGuid(HIGHGUID_PLAYER, owned->second.ownerGuid));
+            FindCompanionOwner(owned->second.ownerGuid);
     };
     new CompanionRecruiterNpc();
     new CompanionRecruiterWorld();

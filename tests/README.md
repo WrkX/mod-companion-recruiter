@@ -16,6 +16,7 @@ Run an individual check from the module root:
 | `python tests/test_gossip_transport.py` | C++ gossip menu construction and Vanilla packet limits | Lua 5.2 is optional; pass `--lua <path>` to also exercise the addon |
 | `python tests/test_auto_revive.py` | Delayed recovery, rezzer detection, instance handling, and AI reset | Sibling server checkout |
 | `python tests/test_dungeon_travel.py` | Safe dungeon entry, re-entry, bindings, and teleport failures | None |
+| `python tests/test_companion_lifecycle.py` | Group preservation during loading screens, login policy, follow after preparation, movement reset on instance changes, and real logout | None |
 
 The gossip check with Lua also verifies addon navigation, permanent class/spec/race purchases,
 roster paging, and suppression of the stock gossip frame. Without Lua it still validates generated
