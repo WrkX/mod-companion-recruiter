@@ -1,77 +1,39 @@
-# Tortoise Companion Recruiter
+# Windrunner Companion Recruiter
 
-A TortoiseWoW module that hires fresh cmangos PlayerBots as temporary party or raid companions.
-It is a native port of the recruiter concept from
-[`WoWGreymane/mod-companionRecruiter`](https://github.com/WoWGreymane/mod-companionRecruiter), informed by
-the older persistent companion implementation in [`WrkX/core`](https://github.com/WrkX/core).
+Hire PlayerBot companions from a Companion Guild recruiter: a tank, healer, or damage dealer for a few hours, a full party or raid fill, or a permanent companion that stays on your character’s roster.
 
-## Features
+This is a TortoiseWoW / Windrunner module. It is a native port of the recruiter from [`WoWGreymane/mod-companionRecruiter`](https://github.com/WoWGreymane/mod-companionRecruiter), with ideas from the older persistent companions in [`WrkX/core`](https://github.com/WrkX/core). It is not a drop-in AzerothCore module.
 
-- Recruit a tank, healer, or damage companion at the player's level.
-- Select a class specialization for temporary and permanent companions; the companion's role is derived from its selected talent tree. Temporary companions receive a random valid race from the owner's faction.
-- Fill a five-player party toward one tank, one healer, and three damage dealers using the selected human roles and the roles of bots already in the group, or fill a 10-, 20-, or 40-player Vanilla raid.
-- Preserve faction-correct class choices and fill missing class coverage in 10- and 20-player raids.
-- Uses the PlayerBots random-account allocator instead of creating ad-hoc accounts.
-- Charges only after character creation succeeds.
-- Initializes level-appropriate spells, skills, equipment, supplies, and pets explicitly for externally managed bots.
-- Shares one preparation budget between temporary recruitment and permanent summons, so a raid does not initialize every bot in one world tick.
-- Reserves pending group slots and refunds contracts that cannot log in and join in time.
-- Companions preserve the group's chosen leadership when joining or reconnecting.
-- Dungeon portals preserve active companion invitations and the existing group through loading screens. Once companions land, they clear movement paths from the previous map or instance.
-- Persists paid temporary contracts across owner logout and world-server restarts, reconnecting their companions until the original absolute contract deadline.
-- Deletes temporary characters after the configurable contract lifetime.
-- Protects expired contracts while the owner is dead or inside an instance. The grace period counts down outside protection and pauses while protected, without resetting on re-entry.
-- Suspends companions while their owner is offline and cleans them up when the owner leaves the group, dismisses them, deletes the owning character, or their contract expires.
-- Sells permanent companions that are stored in a character-owned roster and can be invited again for free.
-- Keeps permanent companion ownership private to the purchasing character, with a configurable roster limit.
-- Sets temporary companions up at the level they were purchased at; active companions do not gain XP or follow their owner's later level-ups.
-- Prepares permanent companions once per summon, catching them up to the owner's level captured at the invitation and refreshing their talents, spells, gear, supplies, and pets.
-- Targets bot level + 5 below level 55, and the owner's average equipped item level (at least 55) from level 55 onward, with configurable preferred and fallback ranges. Summoned companions keep their setup until dismissed; summon them again to refresh it.
+The repository name is `windrunne-companion-Recruiter`. Keep the checkout at `modules/mod-companion-recruiter` in the TortoiseWoW source tree so CMake and SQL updates find it.
 
-Paid temporary contracts are stored in the character database. Logging out or restarting the world server
-logs the companion out without cancelling the purchase; it reconnects when the owner returns, provided the
-original absolute contract deadline (or an active expiry-protection grace period) has not elapsed.
+## What you can do
 
-Temporary contracts last three hours by default. Their gold price increases at every player level,
-interpolating from 1 silver at level 10 through 30 silver at level 40 to 1 gold at level 60.
-Permanent companions cost a flat 75 gold at every level. The temporary multiplier, permanent gold
-price, and contract duration can be adjusted in `mod_companion_recruiter.conf`.
+Talk to a **Companion Recruiter** NPC (title **Companion Guild**) with the client addon enabled.
 
-Equipment generation targets **bot level + 5** for bots below level 55. At level 55 and above,
-it targets **max(55, owner's average equipped item level)**. The average excludes empty slots,
-shirts, and tabards, and rounds to the nearest item level. Each slot first tries suitable items within
-`CompanionRecruiter.GearItemLevelRange` (default **±5**). If none can be equipped, it tries
-`CompanionRecruiter.GearItemLevelFallbackRange` (default **±15**), then the closest suitable lower item.
-The fallback's upper limit and `AiPlayerbot.RandomGearMaxLevel` remain hard caps. Within each range,
-items closest to the target are preferred, with specialization stat weights breaking ties. Class,
-level, faction, uniqueness, and blacklist restrictions still apply. Scarce slots may consequently
-fall below the target; the finished outfit's average is not an exact guarantee.
+- Recruit a single companion at your level, with class and talent tree. Role comes from that tree (tank, healer, or damage). Temporary companions get a random race from your faction.
+- Fill a 5-player party toward one tank, one healer, and three damage dealers, counting roles already in the group.
+- Fill a 10-, 20-, or 40-player Vanilla raid, keeping faction-legal classes and filling missing coverage in 10- and 20-player raids.
+- Buy a permanent companion (flat gold cost). Invite it later from **Manage Roster** at no extra charge. Ownership is per character, with a configurable roster cap.
+- Temporary contracts last three hours by default. Price scales with level (1 silver at 10, 30 silver at 40, 1 gold at 60). You are charged only after the bot character is created.
 
-For example, a level **40** bot targets **45**, preferring item levels **40–50** and widening a missing
-slot to **30–60** before considering older gear. A level **55** bot targets **55** if the owner's
-average is lower or no items are equipped, or **70** if the owner's average is 70. This minimum
-applies to the target, not to each generated item. Both range settings are clamped to 0–100, and the
-fallback cannot be narrower than the preferred range. The target and ranges are captured when
-buying/summoning, so changing equipment while a bot waits for preparation does not change that
-generation. Permanent companions use their level after catching up to the captured owner level.
+Companions stay at the level they were hired or summoned. They do not gain XP or follow later level-ups. Permanent companions catch up to the owner’s level each time you invite them, then refresh talents, spells, gear, supplies, and pets.
 
-Generated equipment is enchanted only when its item level is strictly greater than
-`CompanionRecruiter.EnchantItemLevelThreshold` (default **65**). This applies equally to role-only,
-specialization-selected, party-fill, raid-fill, temporary, and permanent companions. Set the threshold to
-`0` to use PlayerBots' normal level-based enchanting behavior.
+Paid temporary contracts live in the character database. Logging out or restarting the world server logs the companion out; it reconnects when you return if the original deadline (or an active expiry-grace period) has not passed. Expired contracts keep a short grace while you are dead or in an instance: the timer runs in the open world and pauses while protected, without resetting when you go back inside.
 
-The recruiter uses PlayerBots' configured talent paths where they cover a specialization. For any missing
-tree it creates a valid progression path from that class's available talents, spilling into other trees
-when the requested tree is full while keeping it the main specialization, so every Vanilla tree can be
-selected; those generated paths are functional defaults rather than hand-tuned raid builds.
+Companions are cleaned up when you leave the group, dismiss them, delete the owning character, or the contract ends. They keep the group’s chosen leader when they join or reconnect. Dungeon portals keep invitations and the group through loading screens; after they land, leftover movement from the previous map is cleared.
 
-The separate Gurubashi arena automation from the AzerothCore repository is intentionally outside the
-scope of this first port.
+## Requirements
+
+- TortoiseWoW with the native `modules/` framework
+- Vendored cmangos PlayerBots (`BUILD_PLAYERBOTS=ON`) and `AiPlayerbot.Enabled = 1`
+- **Static** module linkage (PlayerBots is not safe to duplicate in a dynamic module)
+
+This TortoiseWoW fork also provides `PlayerbotFactory::InitializeAtCurrentLevel()`, which sets up an externally managed bot without changing its requested level or depending on global random-level / auto-learn settings.
 
 ## Install
 
-Place this repository at `modules/mod-companion-recruiter` in the TortoiseWoW source tree, then configure
-with PlayerBots and modules enabled:
+1. Clone or copy this repo to `modules/mod-companion-recruiter` in the TortoiseWoW source tree.
+2. Configure and build with PlayerBots and static modules:
 
 ```sh
 cmake -S . -B build \
@@ -80,68 +42,88 @@ cmake -S . -B build \
   -DMODULE_MOD_COMPANION_RECRUITER=static
 ```
 
-Allow module SQL updates (`Database.AutoUpdate.AllowedModules = "all"` or add this module to the
-allowlist), and copy `mod_companion_recruiter.conf.dist` to `mod_companion_recruiter.conf` in the installed
-module config directory.
-
-`AiPlayerbot.WindrunnerCompanionMode` defaults to `1` in the PlayerBots configuration. With it
-enabled, the recruiter is the only source of bot creation and login. Existing random bot accounts
-and characters stay in the database but remain offline. Recruited companions still follow and
-fight, answer their owner, and appear in `/who`. The world SQL update installs 1,000 occasional
-party conversations; missing or invalid conversation data disables only that banter. Changing
-Companion Mode requires a server restart. Set it to `0` to restore normal PlayerBots behavior.
-Read the complete dialogue with level, faction, and speaker details in
-[COMPANION_BANTER.md](docs/COMPANION_BANTER.md).
-The DungeonClear `.dc test` harness creates bots directly, so run that harness with Companion Mode
-set to `0` and restart first.
-
-The world migrations create twelve level-60 recruiter variants (`919001` through `919012`) with the
-same `npc_companion_recruiter` gossip script. The original fixed Stormwind and Orgrimmar spawns are
-removed so the final locations can be placed by a GM. See [SPAWN_COMMANDS.md](SPAWN_COMMANDS.md)
-for the entry and display ID mapping and the in-game spawn commands.
-The template SQL removes the inherited invisible trigger flag from all recruiter variants and uses
-the title and greeting **Companion Guild**. For an existing world, apply the two `creature_template`
-and `broadcast_text` UPDATE statements in the section marked `0002_companion_recruiter_variants.sql`
-in `data/sql/world.sql`, then restart the world server to make existing recruiters visible outside GM mode.
-The consolidated world SQL updates existing Goblin and neutral recruiter
-models to their current display IDs.
-The consolidated character SQL creates `companion_recruiter_owned`, which stores each permanent companion's
-owner, purchase metadata, role, and specialization, and `companion_recruiter_contract`, which stores active
-paid temporary contracts and their absolute deadlines. Existing role-only permanent companions receive a
-matching default specialization when the new migration runs.
+3. Allow module SQL (`Database.AutoUpdate.AllowedModules = "all"`, or add this module to the allowlist). Character SQL creates `companion_recruiter_owned` and `companion_recruiter_contract`. World SQL installs recruiter NPCs, gossip, and companion banter.
+4. Copy `conf/mod_companion_recruiter.conf.dist` to `mod_companion_recruiter.conf` in the installed module config directory.
 
 ## Client addon
 
-Copy `addon/CompanionRecruiter` into the Vanilla 1.12 client's `Interface/AddOns` directory.
-Enable **Companion Recruiter** on the character selection AddOns screen, then speak to a
-Companion Recruiter in Stormwind or Orgrimmar. Recruitment uses the addon's own window;
-the stock gossip frame is suppressed for this NPC's recruitment responses.
-Keep the addon and server module updated together. In particular, the permanent-recruitment
-transport fix requires rebuilding and restarting the server as well as updating the addon.
-Copying only the Lua file cannot repair an oversized response from an older server build.
-Use `/crdebug` to open or close a visual preview anywhere. Browse the tabs, class and specialization choices, and party or raid flow in preview mode. Purchases,
-invitations, and dismissals remain disabled until you speak to the NPC. The sample roster is
-only shown in preview mode.
+Copy `addon/CompanionRecruiter` into the Vanilla 1.12 client’s `Interface/AddOns` folder. Enable **Companion Recruiter** on the character-select AddOns screen.
 
-The window supports temporary party filling, class and specialization recruitment, raid filling, permanent
-companion purchases, and a roster tab for inviting or dismissing owned companions. Raid groups get a
-`Fill Raid` action in place of the party fill action.
-Use the **Permanent Recruitment** tab to buy a companion once; use **Manage Roster** to invite it
-again later without another charge.
+Recruitment uses the addon window. The stock gossip frame is suppressed for this NPC’s recruitment replies. Keep the addon and server module in sync; copying only the Lua file will not fix an older server that still sends oversized responses.
 
-## Requirements
+`/crdebug` opens a visual preview anywhere (tabs, class/spec, party and raid flow). Purchases, invitations, and dismissals stay disabled until you speak to a recruiter. The sample roster exists only in preview.
 
-- TortoiseWoW's native `modules/` framework.
-- The vendored cmangos PlayerBots subsystem (`BUILD_PLAYERBOTS=ON`).
-- `AiPlayerbot.Enabled = 1` at runtime.
-- Static module linkage; the vendored PlayerBots library is not safe to duplicate inside a dynamic module.
+## Companion Mode
 
-The integration also adds `PlayerbotFactory::InitializeAtCurrentLevel()` to this TortoiseWoW fork. That
-hook initializes an externally managed bot without changing its requested level or depending on the
-global random-level and auto-learn settings. Its optional `EquipmentItemLevelTarget` carries the
-captured equipment average and ranges into PlayerBots' equipment selection without changing normal
-random-bot generation.
+`AiPlayerbot.WindrunnerCompanionMode` defaults to `1` in PlayerBots config. With it on, this recruiter is the only source of bot creation and login. Existing random-bot accounts stay in the database but remain offline. Recruited companions still follow, fight, answer their owner, and show up in `/who`.
 
-This module is written for the TortoiseWoW APIs and is not a drop-in AzerothCore module.
+Changing Companion Mode needs a **server restart**. Set it to `0` to restore normal PlayerBots behavior. The DungeonClear `.dc test` harness creates bots directly, so run that harness with Companion Mode off and restart first.
 
-See [tests/README.md](tests/README.md) for the standalone checks, their coverage, and prerequisites.
+World SQL installs about 1,000 occasional party conversations. Missing or invalid conversation data disables only that banter. Full scripts (level, faction, speakers) are in [docs/COMPANION_BANTER.md](docs/COMPANION_BANTER.md).
+
+## Recruiter NPCs
+
+World data defines twelve level-60 variants (`919001`–`919012`) on script `npc_companion_recruiter`, plus placed spawns. All use the **Companion Guild** title and greeting.
+
+| Faction | Race | Entry | `.npc add` |
+| --- | --- | --- | --- |
+| Alliance | Human | 919001 | `.npc add 919001` |
+| Alliance | Dwarf | 919002 | `.npc add 919002` |
+| Alliance | Gnome | 919003 | `.npc add 919003` |
+| Alliance | High Elf | 919004 | `.npc add 919004` |
+| Alliance | Night Elf | 919005 | `.npc add 919005` |
+| Horde | Orc | 919006 | `.npc add 919006` |
+| Horde | Troll | 919007 | `.npc add 919007` |
+| Horde | Goblin | 919008 | `.npc add 919008` |
+| Horde | Tauren | 919009 | `.npc add 919009` |
+| Horde | Undead | 919010 | `.npc add 919010` |
+| Neutral | — | 919011 | `.npc add 919011` |
+| Neutral | — | 919012 | `.npc add 919012` |
+
+Stand where you want the NPC, face the right way, then run `.npc add` as a GM. If templates are already loaded, `.reload creature_template` or a world restart is enough.
+
+## Configuration
+
+See `conf/mod_companion_recruiter.conf.dist`. Defaults include:
+
+| Setting | Default | Purpose |
+| --- | --- | --- |
+| `CompanionRecruiter.Enabled` | `1` | Master switch |
+| `CompanionRecruiter.MinimumLevel` | `10` | Lowest player level that can recruit |
+| `CompanionRecruiter.CostMultiplier` | `1.0` | Scales temporary prices (`0` = free) |
+| `CompanionRecruiter.PermanentCostGold` | `75` | One-time permanent purchase |
+| `CompanionRecruiter.MaxOwnedCompanions` | `40` | Permanent roster cap per character |
+| `CompanionRecruiter.LifetimeMinutes` | `180` | Temporary contract length |
+| `CompanionRecruiter.LoginTimeoutSeconds` | `120` | Refund if the bot cannot log in / join |
+| `CompanionRecruiter.PreparationsPerUpdate` | `2` | Spell/gear setup budget per world tick |
+| `CompanionRecruiter.ProtectInInstances` | `1` | Keep expired contracts while dead or instanced |
+| `CompanionRecruiter.ExpiryGraceMinutes` | `10` | Grace after expiry outside protection |
+| `CompanionRecruiter.MaxCompanionsPerPlayer` | `39` | Cap vs. 40-player raid size |
+| `CompanionRecruiter.TeleportDistance` | `100` | Snap companion to owner across maps / distance |
+| `CompanionRecruiter.StuckSeconds` | `8` | Snap if follow is stuck out of combat |
+
+Preparation is rate-limited so a raid fill does not initialize every bot in one tick. Failed logins refund the contract.
+
+## Gear and talents
+
+Temporary companions are geared at the level they were purchased. Permanent companions use their level after catching up to the owner level captured at invite. Target and item-level ranges are captured at that moment; swapping the owner’s gear while a bot waits in the queue does not change that run.
+
+- Below 55: target **bot level + 5**.
+- 55 and up: target **max(55, owner’s average equipped item level)** (empty slots, shirts, and tabards excluded).
+- Prefer items within `GearItemLevelRange` (default ±5). If a slot has nothing usable, widen to `GearItemLevelFallbackRange` (default ±15), then the closest suitable lower item. Caps still apply (`RandomGearMaxLevel` and the fallback upper bound). Scarce slots can land below the target; the outfit average is not guaranteed.
+
+Enchants apply only when item level is **strictly greater** than `EnchantItemLevelThreshold` (default 65). Set it to `0` to use PlayerBots’ normal level-based enchanting.
+
+Talent trees use PlayerBots paths when they exist. Missing Vanilla trees get a generated progression that keeps the requested tree as the main spec. Those paths are functional defaults, not hand-tuned raid builds.
+
+## Tests
+
+Standalone checks (no live server or database) live under `tests/`. See [tests/README.md](tests/README.md) for commands and coverage.
+
+## Out of scope
+
+Gurubashi arena automation from the AzerothCore recruiter is not part of this port.
+
+## License
+
+GNU Affero General Public License v3. See [LICENSE](LICENSE).
