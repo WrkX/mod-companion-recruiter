@@ -2,8 +2,6 @@
 
 Hire PlayerBot companions from a Companion Guild recruiter: a tank, healer, or damage dealer for a few hours, a full party or raid fill, or a permanent companion that stays on your character’s roster.
 
-This is a TortoiseWoW / Windrunner module. It is a native port of the recruiter from [`WoWGreymane/mod-companionRecruiter`](https://github.com/WoWGreymane/mod-companionRecruiter), with ideas from the older persistent companions in [`WrkX/core`](https://github.com/WrkX/core). It is not a drop-in AzerothCore module.
-
 The repository name is `windrunne-companion-Recruiter`. Keep the checkout at `modules/mod-companion-recruiter` in the TortoiseWoW source tree so CMake and SQL updates find it.
 
 ## What you can do
